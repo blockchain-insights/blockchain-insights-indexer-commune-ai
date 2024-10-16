@@ -215,6 +215,7 @@ enum ProcessingError {
 }
 
 async fn fetch_block_data(block_height: i64) -> Result<BlockData, ProcessingError> {
+    let subql_url = std::env::var("SUBQL_URL").expect("SUBQL_URL must be set");
     let client = reqwest::Client::new();
     let query = format!(
         r#"
@@ -282,7 +283,7 @@ async fn fetch_block_data(block_height: i64) -> Result<BlockData, ProcessingErro
     );
 
     let response = client
-        .post("http://localhost:3000")
+        .post(subql_url)
         .json(&serde_json::json!({ "query": query }))
         .send()
         .await
