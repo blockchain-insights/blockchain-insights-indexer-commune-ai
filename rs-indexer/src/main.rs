@@ -127,7 +127,24 @@ struct BalanceSet {
 
 use neo4rs::{BoltString};
 
-impl Transfer {
+async fn get_last_processed_block(graph: &Graph) -> Result<i64, ProcessingError>
+    {
+        let query = "
+         MATCH (n:Cache {field: 'max_block_height'})
+         RETURN n.value AS last_block
+     ";
+
+        let mut result = graph.execute(query.into()).await?;
+
+        if let Some(row) = result.next().await? {
+            let last_block: i64 = row.get("last_block").unwrap_or(0);
+            Ok(last_block)
+        } else {
+            Ok(0) // If no Cache node exists, start from block 0
+        }
+    }
+
+    impl Transfer {
     pub fn to_bolt_type(&self) -> BoltType {
         let mut map = BoltMap::new();
         map.put(BoltString::from("id"), BoltType::String(BoltString::from(self.id.clone())));
@@ -452,11 +469,13 @@ async fn main() -> Result<()> {
     let (task_tx, mut task_rx) = mpsc::channel::<AsyncTask>(100);
     let (result_tx, result_rx) = mpsc::channel::<AsyncResult>(100);
 
+    let last_processed_block = get_last_processed_block(&graph).await?;
+
     world.entity()
         .set(ProcessingState {
             state: State::Idle,
             retry_count: 0,
-            last_processed_block: 0,
+            last_processed_block,
         })
         .set(AsyncTaskSender { tx: task_tx.clone() })
         .set(AsyncTaskReceiver { rx: result_rx });
