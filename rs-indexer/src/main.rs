@@ -518,6 +518,12 @@ async fn main() -> Result<()> {
                 AsyncTask::CancelOperation(block_height) => {
                     result_tx.send(AsyncResult::OperationCancelled(block_height)).await.unwrap();
                 }
+                AsyncTask::EnterPollingMode => {
+                    result_tx.send(AsyncResult::EnterPollingMode).await.unwrap();
+                }
+                AsyncTask::Error => {
+                    result_tx.send(AsyncResult::Error(ProcessingError::ProcessError("Generic error".to_string()))).await.unwrap();
+                }
             }
         }
     });
