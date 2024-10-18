@@ -44,6 +44,8 @@ enum AsyncTask {
     FetchData(i64),
     StoreData(BlockData),
     CancelOperation(i64),
+    EnterPollingMode,
+    Error,
 }
 
 #[derive(Debug)]
@@ -52,6 +54,7 @@ enum AsyncResult {
     DataStored(bool),
     OperationCancelled(i64),
     Error(ProcessingError),
+    EnterPollingMode,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -541,19 +544,20 @@ async fn main() -> Result<()> {
                             state.state = State::Idle;
                             state.last_processed_block += 1;
                             state.retry_count = 0;
-                            
+                        
                             // Check if we need to enter polling mode
+                            let sender_clone = sender.tx.clone();
+                            let current_block = state.last_processed_block;
                             tokio::spawn(async move {
                                 match get_latest_block_height().await {
                                     Ok(latest_block) => {
-                                        if state.last_processed_block > latest_block {
-                                            info!("Entered polling mode. Waiting for new blocks...");
-                                            state.polling_mode = true;
+                                        if current_block > latest_block {
+                                            sender_clone.send(AsyncTask::EnterPollingMode).await.unwrap();
                                         }
                                     }
                                     Err(e) => {
                                         error!("Failed to get latest block height: {:?}", e);
-                                        state.state = State::Error;
+                                        sender_clone.send(AsyncTask::Error).await.unwrap();
                                     }
                                 }
                             });
@@ -569,7 +573,12 @@ async fn main() -> Result<()> {
                     AsyncResult::Error(err) => {
                         error!("Error occurred: {:?}", err);
                         state.state = State::Error;
-                    }
+                    },
+                    AsyncResult::EnterPollingMode => {
+                        info!("Entered polling mode. Waiting for new blocks...");
+                        state.polling_mode = true;
+                        state.state = State::Idle;
+                    },
                 }
             }
         });
@@ -584,24 +593,19 @@ async fn main() -> Result<()> {
                 if state.polling_mode {
                     // Check for new blocks
                     let sender_clone = sender.tx.clone();
+                    let current_block = state.last_processed_block;
                     tokio::spawn(async move {
                         match get_latest_block_height().await {
                             Ok(latest_block) => {
-                                if latest_block > state.last_processed_block {
-                                    info!("New block found: {}", latest_block);
-                                    state.polling_mode = false;
-                                    state.state = State::FetchingData;
-                                    if let Err(e) = sender_clone.try_send(AsyncTask::FetchData(state.last_processed_block + 1)) {
-                                        error!("Failed to send fetch task: {}", e);
-                                        state.state = State::Error;
-                                    }
+                                if latest_block > current_block {
+                                    sender_clone.send(AsyncTask::FetchData(current_block + 1)).await.unwrap();
                                 } else {
-                                    debug!("No new blocks found. Current: {}, Latest: {}", state.last_processed_block, latest_block);
+                                    debug!("No new blocks found. Current: {}, Latest: {}", current_block, latest_block);
                                 }
                             }
                             Err(e) => {
                                 error!("Failed to get latest block height: {:?}", e);
-                                state.state = State::Error;
+                                sender_clone.send(AsyncTask::Error).await.unwrap();
                             }
                         }
                     });
