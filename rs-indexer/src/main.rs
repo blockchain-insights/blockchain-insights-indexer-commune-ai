@@ -16,6 +16,7 @@ struct ProcessingState {
     state: State,
     retry_count: u32,
     last_processed_block: i64,
+    polling_mode: bool,
 }
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug, Default)]
@@ -43,6 +44,8 @@ enum AsyncTask {
     FetchData(i64),
     StoreData(BlockData),
     CancelOperation(i64),
+    EnterPollingMode,
+    Error,
 }
 
 #[derive(Debug)]
@@ -51,6 +54,7 @@ enum AsyncResult {
     DataStored(bool),
     OperationCancelled(i64),
     Error(ProcessingError),
+    EnterPollingMode,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -127,7 +131,24 @@ struct BalanceSet {
 
 use neo4rs::{BoltString};
 
-impl Transfer {
+async fn get_last_processed_block(graph: &Graph) -> Result<i64, ProcessingError>
+    {
+        let query = "
+         MATCH (n:Cache {field: 'max_block_height'})
+         RETURN n.value AS last_block
+     ";
+
+        let mut result = graph.execute(query.into()).await?;
+
+        if let Some(row) = result.next().await? {
+            let last_block: i64 = row.get("last_block").unwrap_or(0);
+            Ok(last_block)
+        } else {
+            Ok(0) // If no Cache node exists, start from block 0
+        }
+    }
+
+    impl Transfer {
     pub fn to_bolt_type(&self) -> BoltType {
         let mut map = BoltMap::new();
         map.put(BoltString::from("id"), BoltType::String(BoltString::from(self.id.clone())));
@@ -452,11 +473,14 @@ async fn main() -> Result<()> {
     let (task_tx, mut task_rx) = mpsc::channel::<AsyncTask>(100);
     let (result_tx, result_rx) = mpsc::channel::<AsyncResult>(100);
 
+    let last_processed_block = get_last_processed_block(&graph).await?;
+
     world.entity()
         .set(ProcessingState {
             state: State::Idle,
             retry_count: 0,
-            last_processed_block: 0,
+            last_processed_block,
+            polling_mode: false,
         })
         .set(AsyncTaskSender { tx: task_tx.clone() })
         .set(AsyncTaskReceiver { rx: result_rx });
@@ -494,6 +518,12 @@ async fn main() -> Result<()> {
                 AsyncTask::CancelOperation(block_height) => {
                     result_tx.send(AsyncResult::OperationCancelled(block_height)).await.unwrap();
                 }
+                AsyncTask::EnterPollingMode => {
+                    result_tx.send(AsyncResult::EnterPollingMode).await.unwrap();
+                }
+                AsyncTask::Error => {
+                    result_tx.send(AsyncResult::Error(ProcessingError::ProcessError("Generic error".to_string()))).await.unwrap();
+                }
             }
         }
     });
@@ -520,6 +550,23 @@ async fn main() -> Result<()> {
                             state.state = State::Idle;
                             state.last_processed_block += 1;
                             state.retry_count = 0;
+                        
+                            // Check if we need to enter polling mode
+                            let sender_clone = sender.tx.clone();
+                            let current_block = state.last_processed_block;
+                            tokio::spawn(async move {
+                                match get_latest_block_height().await {
+                                    Ok(latest_block) => {
+                                        if current_block > latest_block {
+                                            sender_clone.send(AsyncTask::EnterPollingMode).await.unwrap();
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to get latest block height: {:?}", e);
+                                        sender_clone.send(AsyncTask::Error).await.unwrap();
+                                    }
+                                }
+                            });
                         } else {
                             error!("Failed to store data for block: {}", state.last_processed_block);
                             state.state = State::Error;
@@ -532,7 +579,12 @@ async fn main() -> Result<()> {
                     AsyncResult::Error(err) => {
                         error!("Error occurred: {:?}", err);
                         state.state = State::Error;
-                    }
+                    },
+                    AsyncResult::EnterPollingMode => {
+                        info!("Entered polling mode. Waiting for new blocks...");
+                        state.polling_mode = true;
+                        state.state = State::Idle;
+                    },
                 }
             }
         });
@@ -544,11 +596,32 @@ async fn main() -> Result<()> {
                 let span = span!(Level::INFO, "start_processing", block = state.last_processed_block);
                 let _enter = span.enter();
 
-                info!("Starting processing for block: {}", state.last_processed_block);
-                state.state = State::FetchingData;
-                if let Err(e) = sender.tx.try_send(AsyncTask::FetchData(state.last_processed_block)) {
-                    error!("Failed to send fetch task: {}", e);
-                    state.state = State::Error;
+                if state.polling_mode {
+                    // Check for new blocks
+                    let sender_clone = sender.tx.clone();
+                    let current_block = state.last_processed_block;
+                    tokio::spawn(async move {
+                        match get_latest_block_height().await {
+                            Ok(latest_block) => {
+                                if latest_block > current_block {
+                                    sender_clone.send(AsyncTask::FetchData(current_block + 1)).await.unwrap();
+                                } else {
+                                    debug!("No new blocks found. Current: {}, Latest: {}", current_block, latest_block);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to get latest block height: {:?}", e);
+                                sender_clone.send(AsyncTask::Error).await.unwrap();
+                            }
+                        }
+                    });
+                } else {
+                    info!("Starting processing for block: {}", state.last_processed_block);
+                    state.state = State::FetchingData;
+                    if let Err(e) = sender.tx.try_send(AsyncTask::FetchData(state.last_processed_block)) {
+                        error!("Failed to send fetch task: {}", e);
+                        state.state = State::Error;
+                    }
                 }
             }
         });
@@ -593,4 +666,33 @@ async fn main() -> Result<()> {
 
         world.progress();
     }
+}
+async fn get_latest_block_height() -> Result<i64, ProcessingError> {
+    let subql_url = std::env::var("SUBQL_URL").expect("SUBQL_URL must be set");
+    let client = reqwest::Client::new();
+    let query = r#"
+        query {
+            transfers(orderBy: BLOCK_NUMBER_DESC, first: 1) {
+                nodes {
+                    blockNumber
+                }
+            }
+        }
+    "#;
+
+    let response = client
+        .post(subql_url)
+        .json(&serde_json::json!({ "query": query }))
+        .send()
+        .await
+        .map_err(|e| ProcessingError::FetchError(e.to_string()))?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| ProcessingError::FetchError(e.to_string()))?;
+
+    let latest_block = response["data"]["transfers"]["nodes"][0]["blockNumber"]
+        .as_i64()
+        .ok_or_else(|| ProcessingError::ProcessError("Failed to get latest block number".to_string()))?;
+
+    Ok(latest_block)
 }
