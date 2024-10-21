@@ -11,6 +11,25 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, span, warn, Level};
 
+async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> {
+    let indices = vec![
+        ("Transaction", "id"),
+        ("Address", "address"),
+        ("Cache", "field"),
+    ];
+
+    for (label, property) in indices {
+        let query = format!(
+            "CREATE INDEX IF NOT EXISTS FOR (n:{}) ON (n.{})",
+            label, property
+        );
+        graph.run(query.as_str()).await?;
+    }
+
+    info!("Neo4j indices initialized successfully");
+    Ok(())
+}
+
 #[derive(Component, Clone, Serialize, Deserialize, Debug, Default)]
 struct ProcessingState {
     state: State,
@@ -465,6 +484,9 @@ async fn main() -> Result<()> {
     let password = std::env::var("NEO4J_PASSWORD").expect("NEO4J_PASSWORD must be set");
 
     let graph = Arc::new(Graph::new(uri, user, password).await?);
+
+    // Initialize Neo4j indices
+    initialize_neo4j_indices(&graph).await?;
 
     let mut world = World::new();
 
