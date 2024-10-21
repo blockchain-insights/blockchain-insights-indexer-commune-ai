@@ -27,7 +27,7 @@ async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> 
     }
 
     // Create constraint for unique addresses
-    let constraint_query = "CREATE CONSTRAINT address_unique IF NOT EXISTS FOR (n:Address) REQUIRE n.address IS UNIQUE";
+    let constraint_query = "CREATE CONSTRAINT address_unique IF NOT EXISTS FOR (a:Address) REQUIRE a.address IS UNIQUE";
     graph.run(constraint_query).await?;
 
     info!("Neo4j indices and constraints initialized successfully");
