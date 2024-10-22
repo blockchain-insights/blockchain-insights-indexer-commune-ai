@@ -25,7 +25,7 @@
     "@polkadot/api": "^12",
     "@subql/types": "latest",
     "typescript": "^5.2.2",
-    "@subql/cli": "latest",
+    "@subql/cli": "5.2.8",
     "@subql/testing": "latest",
     "@subql/node": "latest",
     "dotenv": "latest"

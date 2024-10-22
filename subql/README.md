@@ -6,7 +6,7 @@
 
 ## Start
 
-First, install SubQuery CLI globally on your terminal by using NPM `npm install -g @subql/cli`
+First, install SubQuery CLI globally on your terminal by using NPM `npm install -g @subql/cli@5.2.8`
 
 You can either clone this GitHub repo, or use the `subql` CLI to bootstrap a clean project in the network of your choosing by running `subql init` and following the prompts.
 

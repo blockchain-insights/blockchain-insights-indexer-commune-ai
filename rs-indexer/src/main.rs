@@ -485,37 +485,90 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         .deposits
         .nodes
         .iter()
-        .map(|d| d.to_bolt_type())
+        .map(|d| {
+            let mut bolt = d.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
+
     let withdrawals_bolt: Vec<BoltType> = block_data
         .withdrawals
         .nodes
         .iter()
-        .map(|w| w.to_bolt_type())
+        .map(|w| {
+            let mut bolt = w.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
+
     let transfers_bolt: Vec<BoltType> = block_data
         .transfers
         .nodes
         .iter()
-        .map(|t| t.to_bolt_type())
+        .map(|t| {
+            let mut bolt = t.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
+
     let stake_addeds_bolt: Vec<BoltType> = block_data
         .stakeAddeds
         .nodes
         .iter()
-        .map(|sa| sa.to_bolt_type())
+        .map(|sa| {
+            let mut bolt = sa.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
+
     let stake_removeds_bolt: Vec<BoltType> = block_data
         .stakeRemoveds
         .nodes
         .iter()
-        .map(|sr| sr.to_bolt_type())
+        .map(|sr| {
+            let mut bolt = sr.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
+
     let balance_sets_bolt: Vec<BoltType> = block_data
         .balanceSets
         .nodes
         .iter()
-        .map(|bs| bs.to_bolt_type())
+        .map(|bs| {
+            let mut bolt = bs.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
 
     let max_block = [
@@ -527,86 +580,76 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         block_data.balanceSets.nodes.iter().map(|x| x.blockNumber).max(),
     ]
         .into_iter()
-        .flatten() // Remove None values
-        .max() // Get the maximum value
+        .flatten()
+        .max()
         .unwrap_or(0);
 
     let query = "
+        MERGE (system:Address {address: 'system'})
+        WITH system
+
         // Process deposits
         UNWIND $deposits AS deposit
-        MERGE (t:Transaction {id: deposit.id})
-        SET t.type = 'deposit',
-            t.amount = deposit.amount,
-            t.blockNumber = deposit.blockNumber,
-            t.date = deposit.date
-        MERGE (a:Address {address: deposit.toId})
-        MERGE (t)-[:DEPOSITED_TO]->(a)
-
-        WITH 1 as dummy
+            MERGE (a:Address {address: deposit.toId})
+            MERGE (system)-[tr:TRANSACTION {id: deposit.id}]->(a)
+            SET tr.type = 'deposit',
+                tr.amount = toFloat(deposit.amount),
+                tr.block_height = deposit.blockNumber,
+                tr.timestamp = datetime(deposit.date)
+        WITH system
 
         // Process withdrawals
         UNWIND $withdrawals AS withdrawal
-        MERGE (t:Transaction {id: withdrawal.id})
-        SET t.type = 'withdrawal',
-            t.amount = withdrawal.amount,
-            t.blockNumber = withdrawal.blockNumber,
-            t.date = withdrawal.date
-        MERGE (a:Address {address: withdrawal.fromId})
-        MERGE (a)-[:WITHDREW]->(t)
-
-        WITH 1 as dummy
+            MERGE (a:Address {address: withdrawal.fromId})
+            MERGE (a)-[tr:TRANSACTION {id: withdrawal.id}]->(system)
+            SET tr.type = 'withdrawal',
+                tr.amount = toFloat(withdrawal.amount),
+                tr.block_height = withdrawal.blockNumber,
+                tr.timestamp = datetime(withdrawal.date)
+        WITH system
 
         // Process transfers
         UNWIND $transfers AS transfer
-        MERGE (t:Transaction {id: transfer.id})
-        SET t.type = 'transfer',
-            t.amount = transfer.amount,
-            t.blockNumber = transfer.blockNumber,
-            t.date = transfer.date
-        MERGE (from:Address {address: transfer.fromId})
-        MERGE (to:Address {address: transfer.toId})
-        MERGE (from)-[:SENT]->(t)
-        MERGE (t)-[:RECEIVED_BY]->(to)
-
-        WITH 1 as dummy
+            MERGE (from:Address {address: transfer.fromId})
+            MERGE (to:Address {address: transfer.toId})
+            MERGE (from)-[tr:TRANSACTION {id: transfer.id}]->(to)
+            SET tr.type = 'transfer',
+                tr.amount = toFloat(transfer.amount),
+                tr.block_height = transfer.blockNumber,
+                tr.timestamp = datetime(transfer.date)
+        WITH system
 
         // Process stake additions
         UNWIND $stake_addeds AS stake_add
-        MERGE (t:Transaction {id: stake_add.id})
-        SET t.type = 'stake_added',
-            t.amount = stake_add.amount,
-            t.blockNumber = stake_add.blockNumber,
-            t.date = stake_add.date
-        MERGE (from:Address {address: stake_add.fromId})
-        MERGE (to:Address {address: stake_add.toId})
-        MERGE (from)-[:ADDED_STAKE]->(t)
-        MERGE (t)-[:STAKE_ADDED_TO]->(to)
-
-        WITH 1 as dummy
+            MERGE (from:Address {address: stake_add.fromId})
+            MERGE (to:Address {address: stake_add.toId})
+            MERGE (from)-[tr:TRANSACTION {id: stake_add.id}]->(to)
+            SET tr.type = 'stake_added',
+                tr.amount = toFloat(stake_add.amount),
+                tr.block_height = stake_add.blockNumber,
+                tr.timestamp = datetime(stake_add.date)
+        WITH system
 
         // Process stake removals
         UNWIND $stake_removeds AS stake_remove
-        MERGE (t:Transaction {id: stake_remove.id})
-        SET t.type = 'stake_removed',
-            t.amount = stake_remove.amount,
-            t.blockNumber = stake_remove.blockNumber,
-            t.date = stake_remove.date
-        MERGE (from:Address {address: stake_remove.fromId})
-        MERGE (to:Address {address: stake_remove.toId})
-        MERGE (from)-[:REMOVED_STAKE]->(t)
-        MERGE (t)-[:STAKE_REMOVED_FROM]->(to)
-
-        WITH 1 as dummy
+            MERGE (from:Address {address: stake_remove.fromId})
+            MERGE (to:Address {address: stake_remove.toId})
+            MERGE (from)-[tr:TRANSACTION {id: stake_remove.id}]->(to)
+            SET tr.type = 'stake_removed',
+                tr.amount = toFloat(stake_remove.amount),
+                tr.block_height = stake_remove.blockNumber,
+                tr.timestamp = datetime(stake_remove.date)
+        WITH system
 
         // Process balance sets
         UNWIND $balance_sets AS balance_set
-        MERGE (t:Transaction {id: balance_set.id})
-        SET t.type = 'balance_set',
-            t.amount = balance_set.amount,
-            t.blockNumber = balance_set.blockNumber,
-            t.date = balance_set.date
-        MERGE (a:Address {address: balance_set.whoId})
-        MERGE (a)-[:BALANCE_SET]->(t)
+            MERGE (a:Address {address: balance_set.whoId})
+            MERGE (system)-[tr:TRANSACTION {id: balance_set.id}]->(a)
+            SET tr.type = 'balance_set',
+                tr.amount = toFloat(balance_set.amount),
+                tr.block_height = balance_set.blockNumber,
+                tr.timestamp = datetime(balance_set.date)
+        RETURN count(*) AS total_operations
     ";
 
     let data_query = neo4rs::Query::new(query.to_string())
@@ -650,6 +693,7 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
 
     Ok(true)
 }
+
 
 
 #[tokio::main]
