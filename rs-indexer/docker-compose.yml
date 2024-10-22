@@ -7,11 +7,11 @@ services:
     environment:
       - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
     volumes:
-      - comai-ff-db:/data
-      - comai-ff-logs:/logs
+      - comai_funds_flow_db:/data
+      - comai_funds_flow_logs:/logs
 
 volumes:
-  comai-ff-db:
-    name: comai-ff-db
-  comai-ff-logs:
-    name: comai-ff-logs
+  comai_funds_flow_db:
+    name: comai_funds_flow_db
+  comai_funds_flow_logs:
+    name: comai_funds_flow_logs

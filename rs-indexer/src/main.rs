@@ -11,12 +11,84 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, span, warn, Level};
 
+async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> {
+    let check_constraint = "
+        SHOW CONSTRAINTS
+        YIELD name, labelsOrTypes, properties
+        WHERE labelsOrTypes = ['Address']
+        AND properties = ['address']
+    ";
+
+    let mut result = graph.execute(check_constraint.into()).await?;
+    let constraint_exists = result.next().await?.is_some();
+
+    if !constraint_exists {
+        // Create constraint only if it doesn't exist
+        let constraint_query = "CREATE CONSTRAINT address_unique IF NOT EXISTS FOR (a:Address) REQUIRE a.address IS UNIQUE;";
+        match graph.run(constraint_query.into()).await {
+            Ok(_) => info!("Created unique constraint on Address.address"),
+            Err(e) => {
+                error!("Failed to create constraint: {:?}", e);
+                return Err(ProcessingError::Neo4jError(e));
+            }
+        }
+    } else {
+        info!("Address unique constraint already exists");
+    }
+
+    let check_indices = "
+        SHOW INDEXES
+        YIELD name, labelsOrTypes, properties
+    ";
+
+    let mut indices_result = graph.execute(check_indices.into()).await?;
+    let mut existing_indices = Vec::new();
+
+    while let Some(row) = indices_result.next().await? {
+        let label: String = row.get("labelsOrTypes").unwrap_or_default();
+        let property: String = row.get("properties").unwrap_or_default();
+        existing_indices.push((label, property));
+    }
+
+    let required_indices = vec![
+        ("Transaction", "id"),
+        ("Cache", "field"),
+    ];
+
+    for (label, property) in required_indices {
+        let index_exists = existing_indices.iter().any(|(l, p)|
+            l.contains(label) && p.contains(property)
+        );
+
+        if !index_exists {
+            let query = format!(
+                "CREATE INDEX IF NOT EXISTS FOR (n:{}) ON (n.{})",
+                label, property
+            );
+            match graph.run(query.as_str().into()).await {
+                Ok(_) => info!("Created index on {}.{}", label, property),
+                Err(e) => {
+                    error!("Failed to create index on {}.{}: {:?}", label, property, e);
+                    return Err(ProcessingError::Neo4jError(e));
+                }
+            }
+        } else {
+            info!("Index on {}.{} already exists", label, property);
+        }
+    }
+
+    info!("Neo4j indices and constraints verification completed");
+    Ok(())
+}
+
 #[derive(Component, Clone, Serialize, Deserialize, Debug, Default)]
 struct ProcessingState {
     state: State,
     retry_count: u32,
     last_processed_block: i64,
     polling_mode: bool,
+    batch_size: i64,
+    current_batch_end: i64,
 }
 
 #[derive(PartialEq, Clone, Serialize, Deserialize, Debug, Default)]
@@ -41,7 +113,7 @@ struct AsyncTaskReceiver {
 
 #[derive(Debug, Clone)]
 enum AsyncTask {
-    FetchData(i64),
+    FetchData(i64, i64),
     StoreData(BlockData),
     CancelOperation(i64),
     EnterPollingMode,
@@ -235,6 +307,92 @@ enum ProcessingError {
     Neo4jError(#[from] neo4rs::Error),
 }
 
+async fn fetch_blocks_data(start_block: i64, end_block: i64) -> Result<BlockData, ProcessingError> {
+    let subql_url = std::env::var("SUBQL_URL").expect("SUBQL_URL must be set");
+    let client = reqwest::Client::new();
+    let query = r#"
+    query($startBlock: Int!, $endBlock: Int!) {
+        deposits(filter: { blockNumber: { greaterThanOrEqualTo: $startBlock, lessThanOrEqualTo: $endBlock } }, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {
+            nodes {
+                id
+                amount
+                blockNumber
+                date
+                toId
+            }
+        }
+        withdrawals(filter: { blockNumber: { greaterThanOrEqualTo: $startBlock, lessThanOrEqualTo: $endBlock } }, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {
+            nodes {
+                id
+                amount
+                blockNumber
+                date
+                fromId
+            }
+        }
+        transfers(filter: { blockNumber: { greaterThanOrEqualTo: $startBlock, lessThanOrEqualTo: $endBlock } }, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {
+            nodes {
+                id
+                amount
+                blockNumber
+                date
+                fromId
+                toId
+            }
+        }
+        stakeAddeds(filter: { blockNumber: { greaterThanOrEqualTo: $startBlock, lessThanOrEqualTo: $endBlock } }, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {
+            nodes {
+                id
+                amount
+                blockNumber
+                date
+                fromId
+                toId
+            }
+        }
+        stakeRemoveds(filter: { blockNumber: { greaterThanOrEqualTo: $startBlock, lessThanOrEqualTo: $endBlock } }, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {
+            nodes {
+                id
+                amount
+                blockNumber
+                date
+                fromId
+                toId
+            }
+        }
+        balanceSets(filter: { blockNumber: { greaterThanOrEqualTo: $startBlock, lessThanOrEqualTo: $endBlock } }, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {
+            nodes {
+                id
+                amount
+                blockNumber
+                date
+                whoId
+            }
+        }
+    }
+    "#;
+
+    let variables = serde_json::json!({
+        "startBlock": start_block,
+        "endBlock": end_block
+    });
+
+    let response = client
+        .post(subql_url)
+        .json(&serde_json::json!({ "query": query, "variables": variables }))
+        .send()
+        .await
+        .map_err(|e| ProcessingError::FetchError(e.to_string()))?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| ProcessingError::FetchError(e.to_string()))?;
+
+   let block_data: BlockData = serde_json::from_value(response["data"].clone())
+        .map_err(|e| ProcessingError::ProcessError(e.to_string()))?;
+
+    Ok(block_data)
+}
+
 async fn fetch_block_data(block_height: i64) -> Result<BlockData, ProcessingError> {
     let subql_url = std::env::var("SUBQL_URL").expect("SUBQL_URL must be set");
     let client = reqwest::Client::new();
@@ -327,121 +485,174 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         .deposits
         .nodes
         .iter()
-        .map(|d| d.to_bolt_type())
+        .map(|d| {
+            let mut bolt = d.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
+
     let withdrawals_bolt: Vec<BoltType> = block_data
         .withdrawals
         .nodes
         .iter()
-        .map(|w| w.to_bolt_type())
+        .map(|w| {
+            let mut bolt = w.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
+
     let transfers_bolt: Vec<BoltType> = block_data
         .transfers
         .nodes
         .iter()
-        .map(|t| t.to_bolt_type())
+        .map(|t| {
+            let mut bolt = t.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
+
     let stake_addeds_bolt: Vec<BoltType> = block_data
         .stakeAddeds
         .nodes
         .iter()
-        .map(|sa| sa.to_bolt_type())
+        .map(|sa| {
+            let mut bolt = sa.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
+
     let stake_removeds_bolt: Vec<BoltType> = block_data
         .stakeRemoveds
         .nodes
         .iter()
-        .map(|sr| sr.to_bolt_type())
+        .map(|sr| {
+            let mut bolt = sr.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
+
     let balance_sets_bolt: Vec<BoltType> = block_data
         .balanceSets
         .nodes
         .iter()
-        .map(|bs| bs.to_bolt_type())
+        .map(|bs| {
+            let mut bolt = bs.to_bolt_type();
+            if let BoltType::Map(ref mut map) = bolt {
+                if let Some(BoltType::Integer(amount)) = map.value.get("amount") {
+                    map.value.insert("amount".into(), BoltType::Float(neo4rs::BoltFloat { value: amount.value as f64 }));
+                }
+            }
+            bolt
+        })
         .collect();
 
+    let max_block = [
+        block_data.deposits.nodes.iter().map(|x| x.blockNumber).max(),
+        block_data.withdrawals.nodes.iter().map(|x| x.blockNumber).max(),
+        block_data.transfers.nodes.iter().map(|x| x.blockNumber).max(),
+        block_data.stakeAddeds.nodes.iter().map(|x| x.blockNumber).max(),
+        block_data.stakeRemoveds.nodes.iter().map(|x| x.blockNumber).max(),
+        block_data.balanceSets.nodes.iter().map(|x| x.blockNumber).max(),
+    ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0);
+
     let query = "
+        MERGE (system:Address {address: 'system'})
+        WITH system
+
         // Process deposits
         UNWIND $deposits AS deposit
-        MERGE (t:Transaction {id: deposit.id})
-        SET t.type = 'deposit',
-            t.amount = deposit.amount,
-            t.blockNumber = deposit.blockNumber,
-            t.date = deposit.date
-        MERGE (a:Address {address: deposit.toId})
-        MERGE (t)-[:DEPOSITED_TO]->(a)
-
-        MERGE (n:Cache {field: 'max_block_height'})
-        SET n.value = deposit.blockNumber
-
-        WITH 1 as dummy
+            MERGE (a:Address {address: deposit.toId})
+            MERGE (system)-[tr:TRANSACTION {id: deposit.id}]->(a)
+            SET tr.type = 'deposit',
+                tr.amount = toFloat(deposit.amount),
+                tr.block_height = deposit.blockNumber,
+                tr.timestamp = datetime(deposit.date)
+        WITH system
 
         // Process withdrawals
         UNWIND $withdrawals AS withdrawal
-        MERGE (t:Transaction {id: withdrawal.id})
-        SET t.type = 'withdrawal',
-            t.amount = withdrawal.amount,
-            t.blockNumber = withdrawal.blockNumber,
-            t.date = withdrawal.date
-        MERGE (a:Address {address: withdrawal.fromId})
-        MERGE (a)-[:WITHDREW]->(t)
-
-        WITH 1 as dummy
+            MERGE (a:Address {address: withdrawal.fromId})
+            MERGE (a)-[tr:TRANSACTION {id: withdrawal.id}]->(system)
+            SET tr.type = 'withdrawal',
+                tr.amount = toFloat(withdrawal.amount),
+                tr.block_height = withdrawal.blockNumber,
+                tr.timestamp = datetime(withdrawal.date)
+        WITH system
 
         // Process transfers
         UNWIND $transfers AS transfer
-        MERGE (t:Transaction {id: transfer.id})
-        SET t.type = 'transfer',
-            t.amount = transfer.amount,
-            t.blockNumber = transfer.blockNumber,
-            t.date = transfer.date
-        MERGE (from:Address {address: transfer.fromId})
-        MERGE (to:Address {address: transfer.toId})
-        MERGE (from)-[:SENT]->(t)
-        MERGE (t)-[:RECEIVED_BY]->(to)
-
-        WITH 1 as dummy
+            MERGE (from:Address {address: transfer.fromId})
+            MERGE (to:Address {address: transfer.toId})
+            MERGE (from)-[tr:TRANSACTION {id: transfer.id}]->(to)
+            SET tr.type = 'transfer',
+                tr.amount = toFloat(transfer.amount),
+                tr.block_height = transfer.blockNumber,
+                tr.timestamp = datetime(transfer.date)
+        WITH system
 
         // Process stake additions
         UNWIND $stake_addeds AS stake_add
-        MERGE (t:Transaction {id: stake_add.id})
-        SET t.type = 'stake_added',
-            t.amount = stake_add.amount,
-            t.blockNumber = stake_add.blockNumber,
-            t.date = stake_add.date
-        MERGE (from:Address {address: stake_add.fromId})
-        MERGE (to:Address {address: stake_add.toId})
-        MERGE (from)-[:ADDED_STAKE]->(t)
-        MERGE (t)-[:STAKE_ADDED_TO]->(to)
-
-        WITH 1 as dummy
+            MERGE (from:Address {address: stake_add.fromId})
+            MERGE (to:Address {address: stake_add.toId})
+            MERGE (from)-[tr:TRANSACTION {id: stake_add.id}]->(to)
+            SET tr.type = 'stake_added',
+                tr.amount = toFloat(stake_add.amount),
+                tr.block_height = stake_add.blockNumber,
+                tr.timestamp = datetime(stake_add.date)
+        WITH system
 
         // Process stake removals
         UNWIND $stake_removeds AS stake_remove
-        MERGE (t:Transaction {id: stake_remove.id})
-        SET t.type = 'stake_removed',
-            t.amount = stake_remove.amount,
-            t.blockNumber = stake_remove.blockNumber,
-            t.date = stake_remove.date
-        MERGE (from:Address {address: stake_remove.fromId})
-        MERGE (to:Address {address: stake_remove.toId})
-        MERGE (from)-[:REMOVED_STAKE]->(t)
-        MERGE (t)-[:STAKE_REMOVED_FROM]->(to)
-
-        WITH 1 as dummy
+            MERGE (from:Address {address: stake_remove.fromId})
+            MERGE (to:Address {address: stake_remove.toId})
+            MERGE (from)-[tr:TRANSACTION {id: stake_remove.id}]->(to)
+            SET tr.type = 'stake_removed',
+                tr.amount = toFloat(stake_remove.amount),
+                tr.block_height = stake_remove.blockNumber,
+                tr.timestamp = datetime(stake_remove.date)
+        WITH system
 
         // Process balance sets
         UNWIND $balance_sets AS balance_set
-        MERGE (t:Transaction {id: balance_set.id})
-        SET t.type = 'balance_set',
-            t.amount = balance_set.amount,
-            t.blockNumber = balance_set.blockNumber,
-            t.date = balance_set.date
-        MERGE (a:Address {address: balance_set.whoId})
-        MERGE (a)-[:BALANCE_SET]->(t)
+            MERGE (a:Address {address: balance_set.whoId})
+            MERGE (system)-[tr:TRANSACTION {id: balance_set.id}]->(a)
+            SET tr.type = 'balance_set',
+                tr.amount = toFloat(balance_set.amount),
+                tr.block_height = balance_set.blockNumber,
+                tr.timestamp = datetime(balance_set.date)
+        RETURN count(*) AS total_operations
     ";
 
-    let query = neo4rs::Query::new(query.to_string())
+    let data_query = neo4rs::Query::new(query.to_string())
         .param("deposits", BoltType::List(BoltList::from(deposits_bolt)))
         .param("withdrawals", BoltType::List(BoltList::from(withdrawals_bolt)))
         .param("transfers", BoltType::List(BoltList::from(transfers_bolt)))
@@ -449,10 +660,40 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         .param("stake_removeds", BoltType::List(BoltList::from(stake_removeds_bolt)))
         .param("balance_sets", BoltType::List(BoltList::from(balance_sets_bolt)));
 
-    txn.run(query).await?;
+    txn.run(data_query).await?;
+
+    if max_block > 0 {
+        let cache_query = "
+            MERGE (n:Cache {field: 'max_block_height'})
+            WITH n, n.value as current_value, $new_value as new_value
+            SET n.value = CASE
+                WHEN current_value IS NULL OR new_value > current_value
+                THEN new_value
+                ELSE current_value
+            END
+        ";
+
+        let cache_update = neo4rs::Query::new(cache_query.to_string())
+            .param("new_value", BoltType::Integer(max_block.into()));
+
+        txn.run(cache_update).await?;
+    }
+
     txn.commit().await?;
+
+    info!("Stored batch with {} deposits, {} withdrawals, {} transfers, {} stake adds, {} stake removes, {} balance sets. Max block: {}",
+        block_data.deposits.nodes.len(),
+        block_data.withdrawals.nodes.len(),
+        block_data.transfers.nodes.len(),
+        block_data.stakeAddeds.nodes.len(),
+        block_data.stakeRemoveds.nodes.len(),
+        block_data.balanceSets.nodes.len(),
+        max_block
+    );
+
     Ok(true)
 }
+
 
 
 #[tokio::main]
@@ -465,6 +706,9 @@ async fn main() -> Result<()> {
     let password = std::env::var("NEO4J_PASSWORD").expect("NEO4J_PASSWORD must be set");
 
     let graph = Arc::new(Graph::new(uri, user, password).await?);
+
+    // Initialize Neo4j indices
+    initialize_neo4j_indices(&graph).await?;
 
     let mut world = World::new();
 
@@ -481,6 +725,8 @@ async fn main() -> Result<()> {
             retry_count: 0,
             last_processed_block,
             polling_mode: false,
+            batch_size: 100,
+            current_batch_end: 0
         })
         .set(AsyncTaskSender { tx: task_tx.clone() })
         .set(AsyncTaskReceiver { rx: result_rx });
@@ -489,8 +735,8 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         while let Some(task) = task_rx.recv().await {
             match task {
-                AsyncTask::FetchData(block_height) => {
-                    match timeout(Duration::from_secs(5), fetch_block_data(block_height)).await {
+                AsyncTask::FetchData(start_block, end_block) => {
+                    match timeout(Duration::from_secs(5), fetch_blocks_data(start_block, end_block)).await {
                         Ok(result) => {
                             match result {
                                 Ok(data) => result_tx.send(AsyncResult::DataFetched(data)).await.unwrap(),
@@ -537,7 +783,8 @@ async fn main() -> Result<()> {
 
                 match result {
                     AsyncResult::DataFetched(block_data) => {
-                        info!("Data fetched successfully for block: {}", state.last_processed_block);
+                        info!("Data fetched successfully for blocks: {} to {}",
+                          state.last_processed_block, state.current_batch_end);
                         state.state = State::StoringData;
                         if let Err(e) = sender.tx.try_send(AsyncTask::StoreData(block_data)) {
                             error!("Failed to send store task: {}", e);
@@ -546,11 +793,12 @@ async fn main() -> Result<()> {
                     },
                     AsyncResult::DataStored(success) => {
                         if success {
-                            info!("Data stored successfully for block: {}", state.last_processed_block);
+                            info!("Data stored successfully for blocks: {} to {}",
+                              state.last_processed_block, state.current_batch_end);
                             state.state = State::Idle;
-                            state.last_processed_block += 1;
+                            state.last_processed_block = state.current_batch_end + 1;
                             state.retry_count = 0;
-                        
+
                             // Check if we need to enter polling mode
                             let sender_clone = sender.tx.clone();
                             let current_block = state.last_processed_block;
@@ -568,16 +816,18 @@ async fn main() -> Result<()> {
                                 }
                             });
                         } else {
-                            error!("Failed to store data for block: {}", state.last_processed_block);
+                            error!("Failed to store data for batch: {} to {}",
+                               state.last_processed_block, state.current_batch_end);
                             state.state = State::Error;
                         }
                     },
                     AsyncResult::OperationCancelled(block_height) => {
-                        info!("Operation cancelled for block: {}", block_height);
+                        info!("Operation cancelled for block batch ending at: {}", block_height);
                         state.state = State::Idle;
                     },
                     AsyncResult::Error(err) => {
-                        error!("Error occurred: {:?}", err);
+                        error!("Error occurred processing batch {} to {}: {:?}",
+                           state.last_processed_block, state.current_batch_end, err);
                         state.state = State::Error;
                     },
                     AsyncResult::EnterPollingMode => {
@@ -589,6 +839,7 @@ async fn main() -> Result<()> {
             }
         });
 
+
     let start_sys = world
         .system::<(&mut ProcessingState, &AsyncTaskSender)>()
         .each_entity(|_, (state, sender)| {
@@ -597,16 +848,22 @@ async fn main() -> Result<()> {
                 let _enter = span.enter();
 
                 if state.polling_mode {
-                    // Check for new blocks
                     let sender_clone = sender.tx.clone();
                     let current_block = state.last_processed_block;
+                    let batch_size = state.batch_size;
                     tokio::spawn(async move {
                         match get_latest_block_height().await {
                             Ok(latest_block) => {
                                 if latest_block > current_block {
-                                    sender_clone.send(AsyncTask::FetchData(current_block + 1)).await.unwrap();
+                                    let end_block = std::cmp::min(
+                                        current_block + batch_size - 1,
+                                        latest_block
+                                    );
+                                    sender_clone.send(AsyncTask::FetchData(current_block, end_block))
+                                        .await.unwrap();
                                 } else {
-                                    debug!("No new blocks found. Current: {}, Latest: {}", current_block, latest_block);
+                                    debug!("No new blocks found. Current: {}, Latest: {}",
+                                      current_block, latest_block);
                                 }
                             }
                             Err(e) => {
@@ -616,9 +873,16 @@ async fn main() -> Result<()> {
                         }
                     });
                 } else {
-                    info!("Starting processing for block: {}", state.last_processed_block);
+                    let next_batch_end = state.last_processed_block + state.batch_size - 1;
+                    info!("Starting processing for block batch: {} to {}",
+                      state.last_processed_block, next_batch_end);
+
+                    state.current_batch_end = next_batch_end;
                     state.state = State::FetchingData;
-                    if let Err(e) = sender.tx.try_send(AsyncTask::FetchData(state.last_processed_block)) {
+
+                    if let Err(e) = sender.tx.try_send(
+                        AsyncTask::FetchData(state.last_processed_block, next_batch_end)
+                    ) {
                         error!("Failed to send fetch task: {}", e);
                         state.state = State::Error;
                     }
@@ -630,22 +894,50 @@ async fn main() -> Result<()> {
         .system::<(&mut ProcessingState, &AsyncTaskSender)>()
         .each_entity(|_, (state, sender)| {
             if state.state == State::Error {
-                let span = span!(Level::ERROR, "error_handling", block = state.last_processed_block);
+                let span = span!(Level::ERROR, "error_handling",
+                start_block = state.last_processed_block,
+                end_block = state.current_batch_end);
                 let _enter = span.enter();
 
-                error!("Handling error for block: {}", state.last_processed_block);
+                error!("Handling error for block batch: {} to {}",
+                   state.last_processed_block, state.current_batch_end);
                 state.retry_count += 1;
+
                 if state.retry_count > 3 {
-                    warn!("Max retries reached for block: {}, moving to next block", state.last_processed_block);
+                    warn!("Max retries reached for batch starting at block: {}, moving to next batch",
+                      state.last_processed_block);
                     state.state = State::Idle;
                     state.retry_count = 0;
-                    state.last_processed_block += 1;
+
+                    state.last_processed_block = state.current_batch_end + 1;
+                    state.current_batch_end = 0;  // Will be set in start_sys
+
                 } else {
-                    info!("Retrying operation for block: {}, attempt {}", state.last_processed_block, state.retry_count);
+                    let retry_delay = 2u64.pow(state.retry_count - 1);
+                    info!("Retrying operation for batch {} to {}, attempt {}, waiting {}s",
+                      state.last_processed_block, state.current_batch_end,
+                      state.retry_count, retry_delay);
+
+                    let adjusted_batch_end = if state.retry_count > 1 {
+                        let reduced_size = (state.current_batch_end - state.last_processed_block + 1) / 2;
+                        state.last_processed_block + reduced_size - 1
+                    } else {
+                        state.current_batch_end
+                    };
+
+                    state.current_batch_end = adjusted_batch_end;
                     state.state = State::FetchingData;
-                    if let Err(e) = sender.tx.try_send(AsyncTask::FetchData(state.last_processed_block)) {
-                        error!("Failed to send retry task: {}", e);
-                    }
+
+                    let sender_clone = sender.tx.clone();
+                    let start_block = state.last_processed_block;
+                    let end_block = adjusted_batch_end;
+
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(retry_delay)).await;
+                        if let Err(e) = sender_clone.try_send(AsyncTask::FetchData(start_block, end_block)) {
+                            error!("Failed to send retry task: {}", e);
+                        }
+                    });
                 }
             }
         });

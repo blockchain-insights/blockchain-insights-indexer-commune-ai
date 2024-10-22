@@ -220,12 +220,12 @@ async function checkAndGetAccount(
   id: string,
   blockNumber: number
 ): Promise<Account> {
-  let account = await Account.get(id.toLowerCase());
+  let account = await Account.get(id);
   if (!account) {
     // We couldn't find the account
     account = Account.create({
-      id: id.toLowerCase(),
-      publicKey: decodeAddress(id).toString().toLowerCase(),
+      id: id,
+      publicKey: decodeAddress(id).toString(),
       firstTransferBlock: blockNumber,
     });
   }
