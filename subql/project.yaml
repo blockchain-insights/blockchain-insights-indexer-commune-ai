@@ -15,6 +15,9 @@ runner:
 schema:
   file: ./schema.graphql
 network:
+  chainId: '0xbc6eb9753e2417476601485f9f8ef8474701ec199d456f989bd397682c9425c5'
+  endpoint:
+    - 'wss://comai.chain-insights.io'
   chaintypes:
     file: ./dist/chaintypes.js
 dataSources:
