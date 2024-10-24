@@ -3,3 +3,5 @@
 /subql/node_modules/
 /subql/package-lock.json
 .idea/
+/subql/.data
+/target
