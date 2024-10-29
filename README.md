@@ -44,9 +44,14 @@ Follow the guide for your OS using the instructions in
     ```
 
 ## Components
-### Subquery Indexer (Subql)
+### Subquery Indexers (subql-balance-tracking,  subql-funds-flow)
+Either funds-flow or balance-tracking can be run in the same manner. Postgres ports for balance-tracking are different than in funds-flow for the subql components. 
+
+The `balance-tracking` subql indexer is stand alone and does not require another component, while the `funds-flow` indexer requires **both** the subql component and rs-indexer.
+
+
 ```bash
-cd subql
+cd subql-funds-flow
 npm i -g @subql/cli@5.2.8
 npm install
 npm run build
@@ -57,8 +62,11 @@ docker compose up
 ```
 
 ### Rust Indexer (rs-indexer)
+The Rust indexer is to create the funds flow model. It will require you to be running the subql-funds-flow docker images.
+
 #### Requirements
 - Neo4j Database: There is a docker-compose.yml file that provides settings for a local Neo4j database. It can be run using `docker compose up neo4j`.
+- subql-funds-flow indexer
 
 Set `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `SUBQL_URL` variables in a .env file according to the `.env.example` file provided, so copy that file and set the values as necessary.
 

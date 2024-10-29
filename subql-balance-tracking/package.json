@@ -1,7 +1,7 @@
 {
-  "name": "comaidx",
+  "name": "comai-balance-tracking-indexer",
   "version": "0.0.4",
-  "description": "This project can be used as a starting point for developing your SubQuery project. It indexes all transfers on Bittensor network",
+  "description": "Blockchain Insights' balance tracking indexer for COMAI.",
   "main": "dist/index.js",
   "scripts": {
     "build": "subql codegen && subql build",

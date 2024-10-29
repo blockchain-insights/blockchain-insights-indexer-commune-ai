@@ -1,7 +1,10 @@
 /rs-indexer/target/
 /rs-indexer/Cargo.lock
-/subql/node_modules/
-/subql/package-lock.json
+/subql-funds-flow/node_modules/
+/subql-balance-tracking/node_modules/
+/subql-funds-flow/package-lock.json
+/subql-balance-tracking/package-lock.json
 .idea/
-/subql/.data
+/subql-funds-flow/.data
+/subql-balance-tracking/.data
 /target
