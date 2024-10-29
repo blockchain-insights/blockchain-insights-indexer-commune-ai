@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::{Context, Result};
 use flecs_ecs::prelude::flecs::pipeline::OnUpdate;
@@ -79,6 +80,16 @@ async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> 
 
     info!("Neo4j indices and constraints verification completed");
     Ok(())
+}
+
+#[derive(Default)]
+struct BlockStats {
+    deposit_count: i64,
+    withdrawal_count: i64,
+    transfer_count: i64,
+    stake_added_count: i64,
+    stake_removed_count: i64,
+    balance_set_count: i64,
 }
 
 #[derive(Component, Clone, Serialize, Deserialize, Debug, Default)]
@@ -220,7 +231,7 @@ async fn get_last_processed_block(graph: &Graph) -> Result<i64, ProcessingError>
         }
     }
 
-    impl Transfer {
+impl Transfer {
     pub fn to_bolt_type(&self) -> BoltType {
         let mut map = BoltMap::new();
         map.put(BoltString::from("id"), BoltType::String(BoltString::from(self.id.clone())));
@@ -393,90 +404,6 @@ async fn fetch_blocks_data(start_block: i64, end_block: i64) -> Result<BlockData
     Ok(block_data)
 }
 
-async fn fetch_block_data(block_height: i64) -> Result<BlockData, ProcessingError> {
-    let subql_url = std::env::var("SUBQL_URL").expect("SUBQL_URL must be set");
-    let client = reqwest::Client::new();
-    let query = format!(
-        r#"
-        query {{
-            deposits(filter: {{ blockNumber: {{ equalTo: {} }} }}, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {{
-                nodes {{
-                    id
-                    amount
-                    blockNumber
-                    date
-                    toId
-                }}
-            }}
-            withdrawals(filter: {{ blockNumber: {{ equalTo: {} }} }}, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {{
-                nodes {{
-                    id
-                    amount
-                    blockNumber
-                    date
-                    fromId
-                }}
-            }}
-            transfers(filter: {{ blockNumber: {{ equalTo: {} }} }}, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {{
-                nodes {{
-                    id
-                    amount
-                    blockNumber
-                    date
-                    fromId
-                    toId
-                }}
-            }}
-            stakeAddeds(filter: {{ blockNumber: {{ equalTo: {} }} }}, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {{
-                nodes {{
-                    id
-                    amount
-                    blockNumber
-                    date
-                    fromId
-                    toId
-                }}
-            }}
-            stakeRemoveds(filter: {{ blockNumber: {{ equalTo: {} }} }}, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {{
-                nodes {{
-                    id
-                    amount
-                    blockNumber
-                    date
-                    fromId
-                    toId
-                }}
-            }}
-            balanceSets(filter: {{ blockNumber: {{ equalTo: {} }} }}, orderBy: [BLOCK_NUMBER_ASC, DATE_ASC]) {{
-                nodes {{
-                    id
-                    amount
-                    blockNumber
-                    date
-                    whoId
-                }}
-            }}
-        }}
-        "#,
-        block_height, block_height, block_height, block_height, block_height, block_height
-    );
-
-    let response = client
-        .post(subql_url)
-        .json(&serde_json::json!({ "query": query }))
-        .send()
-        .await
-        .map_err(|e| ProcessingError::FetchError(e.to_string()))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| ProcessingError::FetchError(e.to_string()))?;
-
-    let block_data: BlockData = serde_json::from_value(response["data"].clone())
-        .map_err(|e| ProcessingError::ProcessError(e.to_string()))?;
-
-    Ok(block_data)
-}
-
 
 async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool, ProcessingError> {
     let mut txn = graph.start_txn().await?;
@@ -584,72 +511,167 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         .max()
         .unwrap_or(0);
 
+    let min_block = [
+        block_data.deposits.nodes.iter().map(|x| x.blockNumber).min(),
+        block_data.withdrawals.nodes.iter().map(|x| x.blockNumber).min(),
+        block_data.transfers.nodes.iter().map(|x| x.blockNumber).min(),
+        block_data.stakeAddeds.nodes.iter().map(|x| x.blockNumber).min(),
+        block_data.stakeRemoveds.nodes.iter().map(|x| x.blockNumber).min(),
+        block_data.balanceSets.nodes.iter().map(|x| x.blockNumber).min(),
+    ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(0);
+
+    // Create stats for ALL blocks in range
+    let mut block_stats: HashMap<i64, BlockStats> =
+        (min_block..=max_block)
+            .map(|block_num| (block_num, BlockStats::default()))
+            .collect();
+
+    // Update stats for blocks with transactions
+    for deposit in &block_data.deposits.nodes {
+        if let Some(stats) = block_stats.get_mut(&deposit.blockNumber) {
+            stats.deposit_count += 1;
+        }
+    }
+
+    for withdrawal in &block_data.withdrawals.nodes {
+        if let Some(stats) = block_stats.get_mut(&withdrawal.blockNumber) {
+            stats.withdrawal_count += 1;
+        }
+    }
+
+    for transfer in &block_data.transfers.nodes {
+        if let Some(stats) = block_stats.get_mut(&transfer.blockNumber) {
+            stats.transfer_count += 1;
+        }
+    }
+
+    for stake_add in &block_data.stakeAddeds.nodes {
+        if let Some(stats) = block_stats.get_mut(&stake_add.blockNumber) {
+            stats.stake_added_count += 1;
+        }
+    }
+
+    for stake_remove in &block_data.stakeRemoveds.nodes {
+        if let Some(stats) = block_stats.get_mut(&stake_remove.blockNumber) {
+            stats.stake_removed_count += 1;
+        }
+    }
+
+    for balance_set in &block_data.balanceSets.nodes {
+        if let Some(stats) = block_stats.get_mut(&balance_set.blockNumber) {
+            stats.balance_set_count += 1;
+        }
+    }
+
+    // Convert block stats to BoltType
+    let blocks_bolt: Vec<BoltType> = block_stats
+        .into_iter()
+        .map(|(block_number, stats)| {
+            let total = stats.deposit_count + stats.withdrawal_count + stats.transfer_count +
+                stats.stake_added_count + stats.stake_removed_count + stats.balance_set_count;
+
+            BoltType::Map(BoltMap {
+                value: HashMap::from([
+                    ("height".into(), BoltType::Integer(block_number.into())),
+                    ("deposit_count".into(), BoltType::Integer(stats.deposit_count.into())),
+                    ("withdrawal_count".into(), BoltType::Integer(stats.withdrawal_count.into())),
+                    ("transfer_count".into(), BoltType::Integer(stats.transfer_count.into())),
+                    ("stake_added_count".into(), BoltType::Integer(stats.stake_added_count.into())),
+                    ("stake_removed_count".into(), BoltType::Integer(stats.stake_removed_count.into())),
+                    ("balance_set_count".into(), BoltType::Integer(stats.balance_set_count.into())),
+                    ("total_txs".into(), BoltType::Integer(total.into())),
+                ])
+            })
+        })
+        .collect();
+
     let query = "
-        MERGE (system:Address {address: 'system'})
-        WITH system
+    MERGE (system:Address {address: 'system'})
+    WITH system
 
-        // Process deposits
-        UNWIND $deposits AS deposit
-            MERGE (a:Address {address: deposit.toId})
-            MERGE (system)-[tr:TRANSACTION {id: deposit.id}]->(a)
-            SET tr.type = 'deposit',
-                tr.amount = toFloat(deposit.amount),
-                tr.block_height = deposit.blockNumber,
-                tr.timestamp = datetime(deposit.date)
-        WITH system
+    // Process deposits
+    UNWIND $deposits AS deposit
+        MERGE (dep_addr:Address {address: deposit.toId})
+        MERGE (system)-[dep_tr:TRANSACTION {id: deposit.id}]->(dep_addr)
+        SET dep_tr.type = 'deposit',
+            dep_tr.amount = toFloat(deposit.amount),
+            dep_tr.block_height = deposit.blockNumber,
+            dep_tr.timestamp = datetime(deposit.date)
+    WITH system
 
-        // Process withdrawals
-        UNWIND $withdrawals AS withdrawal
-            MERGE (a:Address {address: withdrawal.fromId})
-            MERGE (a)-[tr:TRANSACTION {id: withdrawal.id}]->(system)
-            SET tr.type = 'withdrawal',
-                tr.amount = toFloat(withdrawal.amount),
-                tr.block_height = withdrawal.blockNumber,
-                tr.timestamp = datetime(withdrawal.date)
-        WITH system
+    // Process withdrawals
+    UNWIND $withdrawals AS withdrawal
+        MERGE (with_addr:Address {address: withdrawal.fromId})
+        MERGE (with_addr)-[with_tr:TRANSACTION {id: withdrawal.id}]->(system)
+        SET with_tr.type = 'withdrawal',
+            with_tr.amount = toFloat(withdrawal.amount),
+            with_tr.block_height = withdrawal.blockNumber,
+            with_tr.timestamp = datetime(withdrawal.date)
+    WITH system
 
-        // Process transfers
-        UNWIND $transfers AS transfer
-            MERGE (from:Address {address: transfer.fromId})
-            MERGE (to:Address {address: transfer.toId})
-            MERGE (from)-[tr:TRANSACTION {id: transfer.id}]->(to)
-            SET tr.type = 'transfer',
-                tr.amount = toFloat(transfer.amount),
-                tr.block_height = transfer.blockNumber,
-                tr.timestamp = datetime(transfer.date)
-        WITH system
+    // Process transfers
+    UNWIND $transfers AS transfer
+        MERGE (from:Address {address: transfer.fromId})
+        MERGE (to:Address {address: transfer.toId})
+        MERGE (from)-[trans_tr:TRANSACTION {id: transfer.id}]->(to)
+        SET trans_tr.type = 'transfer',
+            trans_tr.amount = toFloat(transfer.amount),
+            trans_tr.block_height = transfer.blockNumber,
+            trans_tr.timestamp = datetime(transfer.date)
+    WITH system
 
-        // Process stake additions
-        UNWIND $stake_addeds AS stake_add
-            MERGE (from:Address {address: stake_add.fromId})
-            MERGE (to:Address {address: stake_add.toId})
-            MERGE (from)-[tr:TRANSACTION {id: stake_add.id}]->(to)
-            SET tr.type = 'stake_added',
-                tr.amount = toFloat(stake_add.amount),
-                tr.block_height = stake_add.blockNumber,
-                tr.timestamp = datetime(stake_add.date)
-        WITH system
+    // Process stake additions
+    UNWIND $stake_addeds AS stake_add
+        MERGE (stake_from:Address {address: stake_add.fromId})
+        MERGE (stake_to:Address {address: stake_add.toId})
+        MERGE (stake_from)-[stake_tr:TRANSACTION {id: stake_add.id}]->(stake_to)
+        SET stake_tr.type = 'stake_added',
+            stake_tr.amount = toFloat(stake_add.amount),
+            stake_tr.block_height = stake_add.blockNumber,
+            stake_tr.timestamp = datetime(stake_add.date)
+    WITH system
 
-        // Process stake removals
-        UNWIND $stake_removeds AS stake_remove
-            MERGE (from:Address {address: stake_remove.fromId})
-            MERGE (to:Address {address: stake_remove.toId})
-            MERGE (from)-[tr:TRANSACTION {id: stake_remove.id}]->(to)
-            SET tr.type = 'stake_removed',
-                tr.amount = toFloat(stake_remove.amount),
-                tr.block_height = stake_remove.blockNumber,
-                tr.timestamp = datetime(stake_remove.date)
-        WITH system
+    // Process stake removals
+    UNWIND $stake_removeds AS stake_remove
+        MERGE (remove_from:Address {address: stake_remove.fromId})
+        MERGE (remove_to:Address {address: stake_remove.toId})
+        MERGE (remove_from)-[remove_tr:TRANSACTION {id: stake_remove.id}]->(remove_to)
+        SET remove_tr.type = 'stake_removed',
+            remove_tr.amount = toFloat(stake_remove.amount),
+            remove_tr.block_height = stake_remove.blockNumber,
+            remove_tr.timestamp = datetime(stake_remove.date)
+    WITH system
 
-        // Process balance sets
-        UNWIND $balance_sets AS balance_set
-            MERGE (a:Address {address: balance_set.whoId})
-            MERGE (system)-[tr:TRANSACTION {id: balance_set.id}]->(a)
-            SET tr.type = 'balance_set',
-                tr.amount = toFloat(balance_set.amount),
-                tr.block_height = balance_set.blockNumber,
-                tr.timestamp = datetime(balance_set.date)
-        RETURN count(*) AS total_operations
+    // Process balance sets
+    UNWIND $balance_sets AS balance_set
+        MERGE (bal_addr:Address {address: balance_set.whoId})
+        MERGE (system)-[bal_tr:TRANSACTION {id: balance_set.id}]->(bal_addr)
+        SET bal_tr.type = 'balance_set',
+            bal_tr.amount = toFloat(balance_set.amount),
+            bal_tr.block_height = balance_set.blockNumber,
+            bal_tr.timestamp = datetime(balance_set.date)
+    WITH system
+
+    RETURN count(*) AS txs_operations
+";
+
+    let blocks_query = "\
+// Create or update blocks
+    UNWIND $blocks AS block
+        MERGE (b:Block {height: block.height})
+        SET b.deposit_count = block.deposit_count,
+            b.withdrawal_count = block.withdrawal_count,
+            b.transfer_count = block.transfer_count,
+            b.stake_added_count = block.stake_added_count,
+            b.stake_removed_count = block.stake_removed_count,
+            b.balance_set_count = block.balance_set_count,
+            b.total_txs = block.total_txs
+
+    RETURN count(*) AS blk_operations
     ";
 
     let data_query = neo4rs::Query::new(query.to_string())
@@ -661,6 +683,9 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         .param("balance_sets", BoltType::List(BoltList::from(balance_sets_bolt)));
 
     txn.run(data_query).await?;
+
+    let blocks_query = neo4rs::Query::new(blocks_query.parse().unwrap())
+        .param("blocks", BoltType::List(BoltList::from(blocks_bolt)));
 
     if max_block > 0 {
         let cache_query = "
@@ -679,6 +704,8 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         txn.run(cache_update).await?;
     }
 
+    txn.run(blocks_query).await?;
+
     txn.commit().await?;
 
     info!("Stored batch with {} deposits, {} withdrawals, {} transfers, {} stake adds, {} stake removes, {} balance sets. Max block: {}",
@@ -693,7 +720,6 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
 
     Ok(true)
 }
-
 
 
 #[tokio::main]
