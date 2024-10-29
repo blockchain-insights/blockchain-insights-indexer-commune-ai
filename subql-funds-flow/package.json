@@ -1,5 +1,5 @@
 {
-  "name": "comaidx",
+  "name": "comai-funds-flow-indexer",
   "version": "0.0.4",
   "description": "This project can be used as a starting point for developing your SubQuery project. It indexes all transfers on Bittensor network",
   "main": "dist/index.js",
