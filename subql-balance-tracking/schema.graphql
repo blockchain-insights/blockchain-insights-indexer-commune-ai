@@ -1,0 +1,52 @@
+# To improve query performance, we strongly suggest adding indexes to any field that you plan to filter or sort by
+# Add the `@index` or `@index(unique: true)` annotation after any non-key field
+# https://academy.subquery.network/build/graphql.html#indexing-by-non-primary-key-field
+
+type BalanceChange @entity {
+  """
+  id field is always required and must look like this
+  """
+  id: ID!
+  """
+  Amount changed
+  """
+  balance: BigInt!
+  """
+  The block height of the transfer
+  """
+  blockNumber: Int!
+  """
+  The date of the transfer
+  """
+  date: Date
+  """
+  What type of event this balance change was done by.
+  """
+  event: String!
+
+  """
+  The account that has a balance change
+  """
+  account: Account!
+}
+
+
+type Account @entity {
+  """
+  id field is always required and must look like this
+  """
+  id: ID!
+  """
+  The public key of this account (same across all Polkadot parachains)
+  """
+  publicKey: String!
+  """
+  The first block on which we see a transfer involving this account
+  """
+  firstChangeBlock: Int
+  """
+  The most recent block on which we see a transfer involving this account
+  """
+  lastChangeBlock: Int
+  balanceChanges: [BalanceChange] @derivedFrom(field: "account") # This is a virtual property to help us navigate to the correct foreign key of BalanceChange
+}
