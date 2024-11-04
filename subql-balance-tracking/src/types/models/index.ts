@@ -4,5 +4,7 @@
 
 export {BalanceChange} from "./BalanceChange"
 
-export {Account} from "./Account"
+export {Block} from "./Block"
+
+export {BalanceAddressBlocks} from "./BalanceAddressBlocks"
 

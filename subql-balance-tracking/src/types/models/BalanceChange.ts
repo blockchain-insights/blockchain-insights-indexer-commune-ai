@@ -12,24 +12,24 @@ export class BalanceChange implements Entity {
         
         id: string,
         balance: bigint,
-        blockNumber: number,
+        block_height: number,
         event: string,
-        accountId: string,
+        address: string,
     ) {
         this.id = id;
         this.balance = balance;
-        this.blockNumber = blockNumber;
+        this.block_height = block_height;
         this.event = event;
-        this.accountId = accountId;
+        this.address = address;
         
     }
 
     public id: string;
     public balance: bigint;
-    public blockNumber: number;
-    public date?: Date;
+    public block_height: number;
+    public timestamp?: Date;
     public event: string;
-    public accountId: string;
+    public address: string;
     
 
     get _name(): string {
@@ -57,11 +57,6 @@ export class BalanceChange implements Entity {
         }
     }
 
-    static async getByAccountId(accountId: string): Promise<BalanceChange[] | undefined>{
-      const records = await store.getByField('BalanceChange', 'accountId', accountId);
-      return records.map(record => this.create(record as BalanceChangeProps));
-    }
-
 
     /**
      * Gets entities matching the specified filters and options.
@@ -78,9 +73,9 @@ export class BalanceChange implements Entity {
         let entity = new this(
             record.id,
             record.balance,
-            record.blockNumber,
+            record.block_height,
             record.event,
-            record.accountId,
+            record.address,
         );
         Object.assign(entity,record);
         return entity;

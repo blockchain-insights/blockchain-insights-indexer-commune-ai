@@ -2,6 +2,7 @@ version: "3"
 
 services:
   postgres:
+    image: timescale/timescaledb:latest-pg16
     build:
       context: .
       dockerfile: ./docker/pg-Dockerfile
@@ -9,6 +10,7 @@ services:
       - 5435:5435
     volumes:
       - .data/postgres:/var/lib/postgresql/data
+      - "./init.sql:/docker-entrypoint-initdb.d/init.sql"
     environment:
       POSTGRES_PASSWORD: postgres
       PGPORT: 5435

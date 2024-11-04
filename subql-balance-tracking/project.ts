@@ -1,8 +1,4 @@
-import {
-  SubstrateDatasourceKind,
-  SubstrateHandlerKind,
-  SubstrateProject,
-} from "@subql/types";
+import {SubstrateDatasourceKind, SubstrateHandlerKind, SubstrateProject,} from "@subql/types";
 
 import * as dotenv from 'dotenv';
 import path from 'path';
@@ -56,6 +52,10 @@ const project: SubstrateProject = {
       mapping: {
         file: "./dist/index.js",
         handlers: [
+          {
+            kind: SubstrateHandlerKind.Block,
+            handler: "handleBlock",
+          },
           {
             kind: SubstrateHandlerKind.Event,
             handler: "handleEvent",
