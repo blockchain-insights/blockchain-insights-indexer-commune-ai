@@ -486,9 +486,23 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
 }
 
 async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool, ProcessingError> {
-    info!("Starting transaction for blocks {} to {}", 
+    // Check if there's any data to process
+    let total_operations = block_data.deposits.nodes.len() +
+        block_data.withdrawals.nodes.len() +
+        block_data.transfers.nodes.len() +
+        block_data.stakeAddeds.nodes.len() +
+        block_data.stakeRemoveds.nodes.len() +
+        block_data.balanceSets.nodes.len();
+
+    if total_operations == 0 {
+        info!("No operations to process in this batch, skipping transaction");
+        return Ok(true);
+    }
+
+    info!("Starting transaction for blocks {} to {} with {} total operations", 
         block_data.deposits.nodes.first().map(|d| d.blockNumber).unwrap_or(0),
-        block_data.deposits.nodes.last().map(|d| d.blockNumber).unwrap_or(0)
+        block_data.deposits.nodes.last().map(|d| d.blockNumber).unwrap_or(0),
+        total_operations
     );
     
     let mut txn = graph.start_txn().await?;
