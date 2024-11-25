@@ -689,111 +689,69 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         .collect();
 
     let query = "
-    // First create system node and all addresses in ordered fashion to prevent deadlocks
-    CREATE (system:Address {address: 'system'})
-    WITH 1 as dummy
-    MATCH (system:Address {address: 'system'})
+    // First create all addresses including system in a single operation
+    MERGE (system:Address {address: 'system'})
+    WITH system
     UNWIND $deposits + $withdrawals + $transfers + $stake_addeds + $stake_removeds + $balance_sets AS tx
-    WITH DISTINCT CASE 
-        WHEN tx.toId IS NOT NULL THEN tx.toId 
-        WHEN tx.fromId IS NOT NULL THEN tx.fromId
-        WHEN tx.whoId IS NOT NULL THEN tx.whoId
-    END AS addr
+    WITH system, tx, 
+         CASE 
+           WHEN tx.toId IS NOT NULL THEN tx.toId 
+           WHEN tx.fromId IS NOT NULL THEN tx.fromId
+           WHEN tx.whoId IS NOT NULL THEN tx.whoId
+         END AS addr
     WHERE addr IS NOT NULL
     MERGE (a:Address {address: addr})
     
-    // Now process each transaction type separately
-    WITH 1 as dummy
-    MATCH (system:Address {address: 'system'})
-    UNWIND $deposits AS deposit
-    MATCH (dep_addr:Address {address: deposit.toId})
-    MERGE (system)-[dep_tr:TRANSACTION {id: deposit.id}]->(dep_addr)
+    // Process all transactions in a single pass
+    WITH system, collect(DISTINCT tx) as all_txs
+    UNWIND all_txs as tx
+    WITH system, tx,
+         CASE tx
+           WHEN tx IN $deposits THEN 'deposit'
+           WHEN tx IN $withdrawals THEN 'withdrawal'
+           WHEN tx IN $transfers THEN 'transfer'
+           WHEN tx IN $stake_addeds THEN 'stake_added'
+           WHEN tx IN $stake_removeds THEN 'stake_removed'
+           WHEN tx IN $balance_sets THEN 'balance_set'
+         END as tx_type,
+         CASE
+           WHEN tx IN $deposits THEN tx.toId
+           WHEN tx IN $withdrawals THEN tx.fromId
+           WHEN tx IN $transfers THEN tx.fromId
+           WHEN tx IN $stake_addeds THEN tx.fromId
+           WHEN tx IN $stake_removeds THEN tx.fromId
+           WHEN tx IN $balance_sets THEN tx.whoId
+         END as from_addr,
+         CASE
+           WHEN tx IN $deposits THEN null
+           WHEN tx IN $withdrawals THEN null
+           WHEN tx IN $transfers THEN tx.toId
+           WHEN tx IN $stake_addeds THEN tx.toId
+           WHEN tx IN $stake_removeds THEN tx.toId
+           WHEN tx IN $balance_sets THEN null
+         END as to_addr
+    
+    WITH system, tx, tx_type, from_addr, to_addr,
+         CASE
+           WHEN tx_type IN ['deposit', 'balance_set'] THEN [system, null]
+           WHEN tx_type = 'withdrawal' THEN [null, system]
+           ELSE [null, null]
+         END as system_endpoints
+    
+    MATCH (start:Address {address: COALESCE(system_endpoints[0], from_addr)})
+    MATCH (end:Address {address: COALESCE(system_endpoints[1], COALESCE(to_addr, from_addr))})
+    
+    MERGE (start)-[tr:TRANSACTION {id: tx.id}]->(end)
     ON CREATE SET 
-        dep_tr.type = 'deposit',
-        dep_tr.amount = toFloat(deposit.amount),
-        dep_tr.block_height = deposit.blockNumber,
-        dep_tr.timestamp = datetime(deposit.date + 'Z')
+        tr.type = tx_type,
+        tr.amount = toFloat(tx.amount),
+        tr.block_height = tx.blockNumber,
+        tr.timestamp = datetime(tx.date + 'Z')
     ON MATCH SET 
-        dep_tr.amount = toFloat(deposit.amount),
-        dep_tr.block_height = deposit.blockNumber,
-        dep_tr.timestamp = datetime(deposit.date + 'Z')
-
-    WITH 1 as dummy
-    MATCH (system:Address {address: 'system'})
-    UNWIND $withdrawals AS withdrawal
-    MATCH (with_addr:Address {address: withdrawal.fromId})
-    MERGE (with_addr)-[with_tr:TRANSACTION {id: withdrawal.id}]->(system)
-    ON CREATE SET 
-        with_tr.type = 'withdrawal',
-        with_tr.amount = toFloat(withdrawal.amount),
-        with_tr.block_height = withdrawal.blockNumber,
-        with_tr.timestamp = datetime(withdrawal.date + 'Z')
-    ON MATCH SET 
-        with_tr.amount = toFloat(withdrawal.amount),
-        with_tr.block_height = withdrawal.blockNumber,
-        with_tr.timestamp = datetime(withdrawal.date + 'Z')
-
-    WITH 1 as dummy
-    MATCH (system:Address {address: 'system'})
-    UNWIND $transfers AS transfer
-    MATCH (from:Address {address: transfer.fromId})
-    MATCH (to:Address {address: transfer.toId})
-    MERGE (from)-[trans_tr:TRANSACTION {id: transfer.id}]->(to)
-    ON CREATE SET 
-        trans_tr.type = 'transfer',
-        trans_tr.amount = toFloat(transfer.amount),
-        trans_tr.block_height = transfer.blockNumber,
-        trans_tr.timestamp = datetime(transfer.date + 'Z')
-    ON MATCH SET 
-        trans_tr.amount = toFloat(transfer.amount),
-        trans_tr.block_height = transfer.blockNumber,
-        trans_tr.timestamp = datetime(transfer.date + 'Z')
-
-    WITH 1 as dummy
-    MATCH (system:Address {address: 'system'})
-    UNWIND $stake_addeds AS stake_add
-    MATCH (stake_from:Address {address: stake_add.fromId})
-    MATCH (stake_to:Address {address: stake_add.toId})
-    MERGE (stake_from)-[stake_tr:TRANSACTION {id: stake_add.id}]->(stake_to)
-    ON CREATE SET 
-        stake_tr.type = 'stake_added',
-        stake_tr.amount = toFloat(stake_add.amount),
-        stake_tr.block_height = stake_add.blockNumber,
-        stake_tr.timestamp = datetime(stake_add.date + 'Z')
-    ON MATCH SET 
-        stake_tr.amount = toFloat(stake_add.amount),
-        stake_tr.block_height = stake_add.blockNumber,
-        stake_tr.timestamp = datetime(stake_add.date + 'Z')
-
-    WITH system
-    UNWIND $stake_removeds AS stake_remove
-    MATCH (remove_from:Address {address: stake_remove.fromId})
-    MATCH (remove_to:Address {address: stake_remove.toId})
-    MERGE (remove_from)-[remove_tr:TRANSACTION {id: stake_remove.id}]->(remove_to)
-    ON CREATE SET 
-        remove_tr.type = 'stake_removed',
-        remove_tr.amount = toFloat(stake_remove.amount),
-        remove_tr.block_height = stake_remove.blockNumber,
-        remove_tr.timestamp = datetime(stake_remove.date + 'Z')
-    ON MATCH SET 
-        remove_tr.amount = toFloat(stake_remove.amount),
-        remove_tr.block_height = stake_remove.blockNumber,
-        remove_tr.timestamp = datetime(stake_remove.date + 'Z')
-
-    WITH system
-    UNWIND $balance_sets AS balance_set
-    MATCH (bal_addr:Address {address: balance_set.whoId})
-    MERGE (system)-[bal_tr:TRANSACTION {id: balance_set.id}]->(bal_addr)
-    ON CREATE SET 
-        bal_tr.type = 'balance_set',
-        bal_tr.amount = toFloat(balance_set.amount),
-        bal_tr.block_height = balance_set.blockNumber,
-        bal_tr.timestamp = datetime(balance_set.date + 'Z')
-    ON MATCH SET 
-        bal_tr.amount = toFloat(balance_set.amount),
-        bal_tr.block_height = balance_set.blockNumber,
-        bal_tr.timestamp = datetime(balance_set.date + 'Z')
-
+        tr.amount = toFloat(tx.amount),
+        tr.block_height = tx.blockNumber,
+        tr.timestamp = datetime(tx.date + 'Z')
+    
     RETURN count(*) AS txs_operations
 ";
 
