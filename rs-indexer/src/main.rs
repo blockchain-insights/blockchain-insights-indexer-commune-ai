@@ -670,10 +670,10 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         .collect();
 
     let query = "
-    // First create all addresses in ordered fashion to prevent deadlocks
-    MERGE (system:Address {address: 'system'})
-    
-    WITH system
+    // First create system node and all addresses in ordered fashion to prevent deadlocks
+    CREATE (system:Address {address: 'system'})
+    WITH 1 as dummy
+    MATCH (system:Address {address: 'system'})
     UNWIND $deposits + $withdrawals + $transfers + $stake_addeds + $stake_removeds + $balance_sets AS tx
     WITH DISTINCT CASE 
         WHEN tx.toId IS NOT NULL THEN tx.toId 
@@ -684,7 +684,8 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
     MERGE (a:Address {address: addr})
     
     // Now process each transaction type separately
-    WITH system
+    WITH 1 as dummy
+    MATCH (system:Address {address: 'system'})
     UNWIND $deposits AS deposit
     MATCH (dep_addr:Address {address: deposit.toId})
     MERGE (system)-[dep_tr:TRANSACTION {id: deposit.id}]->(dep_addr)
@@ -698,7 +699,8 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         dep_tr.block_height = deposit.blockNumber,
         dep_tr.timestamp = datetime(deposit.date + 'Z')
 
-    WITH system
+    WITH 1 as dummy
+    MATCH (system:Address {address: 'system'})
     UNWIND $withdrawals AS withdrawal
     MATCH (with_addr:Address {address: withdrawal.fromId})
     MERGE (with_addr)-[with_tr:TRANSACTION {id: withdrawal.id}]->(system)
@@ -712,7 +714,8 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         with_tr.block_height = withdrawal.blockNumber,
         with_tr.timestamp = datetime(withdrawal.date + 'Z')
 
-    WITH system
+    WITH 1 as dummy
+    MATCH (system:Address {address: 'system'})
     UNWIND $transfers AS transfer
     MATCH (from:Address {address: transfer.fromId})
     MATCH (to:Address {address: transfer.toId})
@@ -727,7 +730,8 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         trans_tr.block_height = transfer.blockNumber,
         trans_tr.timestamp = datetime(transfer.date + 'Z')
 
-    WITH system
+    WITH 1 as dummy
+    MATCH (system:Address {address: 'system'})
     UNWIND $stake_addeds AS stake_add
     MATCH (stake_from:Address {address: stake_add.fromId})
     MATCH (stake_to:Address {address: stake_add.toId})
