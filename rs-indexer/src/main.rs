@@ -681,13 +681,11 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         WHEN tx.whoId IS NOT NULL THEN tx.whoId
     END AS addr
     WHERE addr IS NOT NULL
-    ORDER BY addr
     MERGE (a:Address {address: addr})
     
     // Now process each transaction type separately
     WITH system
     UNWIND $deposits AS deposit
-    ORDER BY deposit.blockNumber, deposit.id
     MATCH (dep_addr:Address {address: deposit.toId})
     MERGE (system)-[dep_tr:TRANSACTION {id: deposit.id}]->(dep_addr)
     ON CREATE SET 
@@ -702,7 +700,6 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
 
     WITH system
     UNWIND $withdrawals AS withdrawal
-    ORDER BY withdrawal.blockNumber, withdrawal.id
     MATCH (with_addr:Address {address: withdrawal.fromId})
     MERGE (with_addr)-[with_tr:TRANSACTION {id: withdrawal.id}]->(system)
     ON CREATE SET 
@@ -717,7 +714,6 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
 
     WITH system
     UNWIND $transfers AS transfer
-    ORDER BY transfer.blockNumber, transfer.id
     MATCH (from:Address {address: transfer.fromId})
     MATCH (to:Address {address: transfer.toId})
     MERGE (from)-[trans_tr:TRANSACTION {id: transfer.id}]->(to)
@@ -733,7 +729,6 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
 
     WITH system
     UNWIND $stake_addeds AS stake_add
-    ORDER BY stake_add.blockNumber, stake_add.id
     MATCH (stake_from:Address {address: stake_add.fromId})
     MATCH (stake_to:Address {address: stake_add.toId})
     MERGE (stake_from)-[stake_tr:TRANSACTION {id: stake_add.id}]->(stake_to)
@@ -749,7 +744,6 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
 
     WITH system
     UNWIND $stake_removeds AS stake_remove
-    ORDER BY stake_remove.blockNumber, stake_remove.id
     MATCH (remove_from:Address {address: stake_remove.fromId})
     MATCH (remove_to:Address {address: stake_remove.toId})
     MERGE (remove_from)-[remove_tr:TRANSACTION {id: stake_remove.id}]->(remove_to)
@@ -765,7 +759,6 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
 
     WITH system
     UNWIND $balance_sets AS balance_set
-    ORDER BY balance_set.blockNumber, balance_set.id
     MATCH (bal_addr:Address {address: balance_set.whoId})
     MERGE (system)-[bal_tr:TRANSACTION {id: balance_set.id}]->(bal_addr)
     ON CREATE SET 
