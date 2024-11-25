@@ -847,33 +847,45 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
     match txn.commit().await {
         Ok(_) => info!("Transaction committed successfully"),
         Err(e) => {
-            error!("Transaction conflict detected: {}", e);
-            if e.to_string().contains("Cannot resolve conflicting transactions") {
-                // Log details about the conflicting operations
-                info!("Conflict details:");
-                info!("Deposits: {} operations", block_data.deposits.nodes.len());
-                info!("Withdrawals: {} operations", block_data.withdrawals.nodes.len());
-                info!("Transfers: {} operations", block_data.transfers.nodes.len());
-                info!("Stake Adds: {} operations", block_data.stakeAddeds.nodes.len());
-                info!("Stake Removes: {} operations", block_data.stakeRemoveds.nodes.len());
-                info!("Balance Sets: {} operations", block_data.balanceSets.nodes.len());
-                
-                // Log affected addresses
-                let mut affected_addresses = Vec::new();
-                for d in &block_data.deposits.nodes {
-                    affected_addresses.push(d.toId.clone());
-                }
-                for w in &block_data.withdrawals.nodes {
-                    affected_addresses.push(w.fromId.clone());
-                }
-                for t in &block_data.transfers.nodes {
-                    affected_addresses.push(t.fromId.clone());
-                    affected_addresses.push(t.toId.clone());
-                }
-                affected_addresses.sort();
-                affected_addresses.dedup();
-                info!("Affected addresses: {:?}", affected_addresses);
+            let error_msg = e.to_string();
+            error!("Transaction error occurred: {}", error_msg);
+            
+            // Always log operation details on error
+            error!("Transaction conflict details:");
+            error!("- Deposits: {} operations", block_data.deposits.nodes.len());
+            error!("- Withdrawals: {} operations", block_data.withdrawals.nodes.len());
+            error!("- Transfers: {} operations", block_data.transfers.nodes.len());
+            error!("- Stake Adds: {} operations", block_data.stakeAddeds.nodes.len());
+            error!("- Stake Removes: {} operations", block_data.stakeRemoveds.nodes.len());
+            error!("- Balance Sets: {} operations", block_data.balanceSets.nodes.len());
+            
+            // Collect and log affected addresses
+            let mut affected_addresses = Vec::new();
+            for d in &block_data.deposits.nodes {
+                affected_addresses.push(d.toId.clone());
             }
+            for w in &block_data.withdrawals.nodes {
+                affected_addresses.push(w.fromId.clone());
+            }
+            for t in &block_data.transfers.nodes {
+                affected_addresses.push(t.fromId.clone());
+                affected_addresses.push(t.toId.clone());
+            }
+            for sa in &block_data.stakeAddeds.nodes {
+                affected_addresses.push(sa.fromId.clone());
+                affected_addresses.push(sa.toId.clone());
+            }
+            for sr in &block_data.stakeRemoveds.nodes {
+                affected_addresses.push(sr.fromId.clone());
+                affected_addresses.push(sr.toId.clone());
+            }
+            for bs in &block_data.balanceSets.nodes {
+                affected_addresses.push(bs.whoId.clone());
+            }
+            affected_addresses.sort();
+            affected_addresses.dedup();
+            error!("- Affected addresses ({}): {:?}", affected_addresses.len(), affected_addresses);
+            
             return Err(ProcessingError::Neo4jError(e));
         }
     };
