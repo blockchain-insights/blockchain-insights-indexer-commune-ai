@@ -486,6 +486,11 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
 }
 
 async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool, ProcessingError> {
+    info!("Starting transaction for blocks {} to {}", 
+        block_data.deposits.nodes.first().map(|d| d.blockNumber).unwrap_or(0),
+        block_data.deposits.nodes.last().map(|d| d.blockNumber).unwrap_or(0)
+    );
+    
     let mut txn = graph.start_txn().await?;
 
     let deposits_bolt: Vec<BoltType> = block_data
@@ -825,7 +830,39 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
 
     txn.run(blocks_query).await?;
 
-    txn.commit().await?;
+    match txn.commit().await {
+        Ok(_) => info!("Transaction committed successfully"),
+        Err(e) => {
+            error!("Transaction conflict detected: {}", e);
+            if e.to_string().contains("Cannot resolve conflicting transactions") {
+                // Log details about the conflicting operations
+                info!("Conflict details:");
+                info!("Deposits: {} operations", block_data.deposits.nodes.len());
+                info!("Withdrawals: {} operations", block_data.withdrawals.nodes.len());
+                info!("Transfers: {} operations", block_data.transfers.nodes.len());
+                info!("Stake Adds: {} operations", block_data.stakeAddeds.nodes.len());
+                info!("Stake Removes: {} operations", block_data.stakeRemoveds.nodes.len());
+                info!("Balance Sets: {} operations", block_data.balanceSets.nodes.len());
+                
+                // Log affected addresses
+                let mut affected_addresses = Vec::new();
+                for d in &block_data.deposits.nodes {
+                    affected_addresses.push(d.toId.clone());
+                }
+                for w in &block_data.withdrawals.nodes {
+                    affected_addresses.push(w.fromId.clone());
+                }
+                for t in &block_data.transfers.nodes {
+                    affected_addresses.push(t.fromId.clone());
+                    affected_addresses.push(t.toId.clone());
+                }
+                affected_addresses.sort();
+                affected_addresses.dedup();
+                info!("Affected addresses: {:?}", affected_addresses);
+            }
+            return Err(ProcessingError::Neo4jError(e));
+        }
+    };
 
     info!("Stored batch with {} deposits, {} withdrawals, {} transfers, {} stake adds, {} stake removes, {} balance sets. Max block: {}",
         block_data.deposits.nodes.len(),
