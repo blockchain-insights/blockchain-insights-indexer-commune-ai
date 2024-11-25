@@ -6,7 +6,7 @@ use flecs_ecs::prelude::flecs::pipeline::OnUpdate;
 use flecs_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 use dotenv::dotenv;
-use neo4rs::{BoltInteger, BoltList, BoltMap, BoltType, Error, Graph, Node};
+use neo4rs::{BoltInteger, BoltList, BoltMap, BoltType, Error, Graph, Node, ConfigBuilder};
 use reqwest;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
@@ -654,7 +654,7 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         SET dep_tr.type = 'deposit',
             dep_tr.amount = toFloat(deposit.amount),
             dep_tr.block_height = deposit.blockNumber,
-            dep_tr.timestamp = datetime(deposit.date)
+            dep_tr.timestamp = datetime(deposit.date + 'Z')
     WITH system
 
     // Process withdrawals
@@ -664,7 +664,7 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         SET with_tr.type = 'withdrawal',
             with_tr.amount = toFloat(withdrawal.amount),
             with_tr.block_height = withdrawal.blockNumber,
-            with_tr.timestamp = datetime(withdrawal.date)
+            with_tr.timestamp = datetime(withdrawal.date + 'Z')
     WITH system
 
     // Process transfers
@@ -675,7 +675,7 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         SET trans_tr.type = 'transfer',
             trans_tr.amount = toFloat(transfer.amount),
             trans_tr.block_height = transfer.blockNumber,
-            trans_tr.timestamp = datetime(transfer.date)
+            trans_tr.timestamp = datetime(transfer.date + 'Z')
     WITH system
 
     // Process stake additions
@@ -686,7 +686,7 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         SET stake_tr.type = 'stake_added',
             stake_tr.amount = toFloat(stake_add.amount),
             stake_tr.block_height = stake_add.blockNumber,
-            stake_tr.timestamp = datetime(stake_add.date)
+            stake_tr.timestamp = datetime(stake_add.date + 'Z')
     WITH system
 
     // Process stake removals
@@ -697,7 +697,7 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         SET remove_tr.type = 'stake_removed',
             remove_tr.amount = toFloat(stake_remove.amount),
             remove_tr.block_height = stake_remove.blockNumber,
-            remove_tr.timestamp = datetime(stake_remove.date)
+            remove_tr.timestamp = datetime(stake_remove.date + 'Z')
     WITH system
 
     // Process balance sets
@@ -707,7 +707,7 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         SET bal_tr.type = 'balance_set',
             bal_tr.amount = toFloat(balance_set.amount),
             bal_tr.block_height = balance_set.blockNumber,
-            bal_tr.timestamp = datetime(balance_set.date)
+            bal_tr.timestamp = datetime(balance_set.date + 'Z')
     WITH system
 
     RETURN count(*) AS txs_operations
@@ -787,8 +787,14 @@ async fn main() -> Result<()> {
     let user = std::env::var("GRAPH_DB_USER").expect("NEO4J_USER must be set");
     let password = std::env::var("GRAPH_DB_PASSWORD").expect("NEO4J_PASSWORD must be set");
 
+    let config = ConfigBuilder::default()
+        .uri(uri)
+        .user(user)
+        .password(password)
+        .db("memgraph")
+        .build()?;
 
-    let graph = Arc::new(Graph::new(uri, user, password).await?);
+    let graph = Arc::new(Graph::connect(config).await?);
 
     // Initialize indices based on database type
     initialize_indices(&graph, &db_type).await?;
