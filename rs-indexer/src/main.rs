@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::{Context, Result};
+use std::env;
 use flecs_ecs::prelude::flecs::pipeline::OnUpdate;
 use flecs_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,59 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, span, warn, Level};
+
+async fn initialize_indices(graph: &Graph, db_type: &str) -> Result<(), ProcessingError> {
+    match db_type {
+        "neo4j" => initialize_neo4j_indices(graph).await,
+        "memgraph" => initialize_memgraph_indices(graph).await,
+        _ => Err(ProcessingError::ProcessError("Unsupported database type".to_string()))
+    }
+}
+
+async fn initialize_memgraph_indices(graph: &Graph) -> Result<(), ProcessingError> {
+    let check_indices = "SHOW INDEX INFO;";
+    let mut result = graph.execute(check_indices.into()).await?;
+    let mut existing_indices = Vec::new();
+
+    while let Some(row) = result.next().await? {
+        if let Some(label) = row.get::<String>("label") {
+            if let Some(property) = row.get::<String>("property") {
+                existing_indices.push((label, property));
+            }
+        }
+    }
+
+    let required_indices = vec![
+        ("Address", "address"),
+        ("Transaction", "id"),
+        ("Cache", "field"),
+    ];
+
+    for (label, property) in required_indices {
+        let index_exists = existing_indices.iter().any(|(l, p)|
+            l == label && p == property
+        );
+
+        if !index_exists {
+            let query = format!(
+                "CREATE INDEX ON :{} ({})",
+                label, property
+            );
+            match graph.run(query.as_str().into()).await {
+                Ok(_) => info!("Created index on {}.{}", label, property),
+                Err(e) => {
+                    error!("Failed to create index on {}.{}: {:?}", label, property, e);
+                    return Err(ProcessingError::Neo4jError(e));
+                }
+            }
+        } else {
+            info!("Index on {}.{} already exists", label, property);
+        }
+    }
+
+    info!("Memgraph indices verification completed");
+    Ok(())
+}
 
 async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> {
     let check_constraint = "
@@ -727,14 +781,30 @@ async fn main() -> Result<()> {
     dotenv().ok();
     tracing_subscriber::fmt::init();
 
-    let uri = std::env::var("NEO4J_URI").expect("NEO4J_URI must be set");
-    let user = std::env::var("NEO4J_USER").expect("NEO4J_USER must be set");
-    let password = std::env::var("NEO4J_PASSWORD").expect("NEO4J_PASSWORD must be set");
+    let db_type = env::var("DB_TYPE").unwrap_or_else(|_| "neo4j".to_string());
+    
+    let uri = match db_type.as_str() {
+        "neo4j" => env::var("NEO4J_URI").expect("NEO4J_URI must be set"),
+        "memgraph" => env::var("MEMGRAPH_URI").expect("MEMGRAPH_URI must be set"),
+        _ => panic!("Unsupported database type")
+    };
+    
+    let user = match db_type.as_str() {
+        "neo4j" => env::var("NEO4J_USER").expect("NEO4J_USER must be set"),
+        "memgraph" => env::var("MEMGRAPH_USER").unwrap_or_else(|_| "".to_string()),
+        _ => panic!("Unsupported database type")
+    };
+    
+    let password = match db_type.as_str() {
+        "neo4j" => env::var("NEO4J_PASSWORD").expect("NEO4J_PASSWORD must be set"),
+        "memgraph" => env::var("MEMGRAPH_PASSWORD").unwrap_or_else(|_| "".to_string()),
+        _ => panic!("Unsupported database type")
+    };
 
     let graph = Arc::new(Graph::new(uri, user, password).await?);
 
-    // Initialize Neo4j indices
-    initialize_neo4j_indices(&graph).await?;
+    // Initialize indices based on database type
+    initialize_indices(&graph, &db_type).await?;
 
     let mut world = World::new();
 
