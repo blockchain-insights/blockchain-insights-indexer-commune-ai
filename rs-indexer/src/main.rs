@@ -27,8 +27,8 @@ async fn initialize_memgraph_indices(graph: &Graph) -> Result<(), ProcessingErro
     let mut existing_indices = Vec::new();
 
     while let Some(row) = result.next().await? {
-        if let Some(label) = row.get::<String>("label") {
-            if let Some(property) = row.get::<String>("property") {
+        if let Ok(label) = row.get::<String>("label") {
+            if let Ok(property) = row.get::<String>("property") {
                 existing_indices.push((label, property));
             }
         }
