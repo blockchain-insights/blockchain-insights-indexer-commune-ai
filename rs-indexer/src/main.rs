@@ -867,7 +867,7 @@ async fn main() -> Result<()> {
     dotenv().ok();
     tracing_subscriber::fmt::init();
 
-    let db_type = env::var("DB_TYPE").unwrap_or_else(|_| "neo4j".to_string());
+    let db_type = env::var("DB_TYPE").unwrap_or_else(|_| "memgraph".to_string());
 
     let uri = std::env::var("GRAPH_DB_URI").expect("NEO4J_URI must be set");
     let user = std::env::var("GRAPH_DB_USER").expect("NEO4J_USER must be set");
