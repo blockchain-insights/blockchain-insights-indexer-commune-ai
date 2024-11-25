@@ -900,7 +900,7 @@ async fn main() -> Result<()> {
             retry_count: 0,
             last_processed_block,
             polling_mode: false,
-            batch_size: 100,
+            batch_size: 5,
             current_batch_end: 0
         })
         .set(AsyncTaskSender { tx: task_tx.clone() })
