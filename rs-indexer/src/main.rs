@@ -782,24 +782,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let db_type = env::var("DB_TYPE").unwrap_or_else(|_| "neo4j".to_string());
-    
-    let uri = match db_type.as_str() {
-        "neo4j" => env::var("NEO4J_URI").expect("NEO4J_URI must be set"),
-        "memgraph" => env::var("MEMGRAPH_URI").expect("MEMGRAPH_URI must be set"),
-        _ => panic!("Unsupported database type")
-    };
-    
-    let user = match db_type.as_str() {
-        "neo4j" => env::var("NEO4J_USER").expect("NEO4J_USER must be set"),
-        "memgraph" => env::var("MEMGRAPH_USER").unwrap_or_else(|_| "".to_string()),
-        _ => panic!("Unsupported database type")
-    };
-    
-    let password = match db_type.as_str() {
-        "neo4j" => env::var("NEO4J_PASSWORD").expect("NEO4J_PASSWORD must be set"),
-        "memgraph" => env::var("MEMGRAPH_PASSWORD").unwrap_or_else(|_| "".to_string()),
-        _ => panic!("Unsupported database type")
-    };
+
+    let uri = std::env::var("GRAPH_DB_URI").expect("NEO4J_URI must be set");
+    let user = std::env::var("GRAPH_DB_USER").expect("NEO4J_USER must be set");
+    let password = std::env::var("GRAPH_DB_PASSWORD").expect("NEO4J_PASSWORD must be set");
+
 
     let graph = Arc::new(Graph::new(uri, user, password).await?);
 
