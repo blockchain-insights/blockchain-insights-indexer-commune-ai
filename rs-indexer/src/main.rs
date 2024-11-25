@@ -460,6 +460,32 @@ async fn fetch_blocks_data(start_block: i64, end_block: i64) -> Result<BlockData
 
 
 async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool, ProcessingError> {
+    let max_retries = 3;
+    let mut retry_count = 0;
+    
+    while retry_count < max_retries {
+        match try_store_block_data(graph, block_data).await {
+            Ok(success) => return Ok(success),
+            Err(e) => {
+                if let ProcessingError::Neo4jError(ref neo_err) = e {
+                    if neo_err.to_string().contains("Cannot resolve conflicting transactions") {
+                        retry_count += 1;
+                        if retry_count < max_retries {
+                            info!("Transaction conflict detected, retrying ({}/{})", retry_count, max_retries);
+                            tokio::time::sleep(Duration::from_millis(100 * retry_count as u64)).await;
+                            continue;
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        }
+    }
+    
+    Err(ProcessingError::ProcessError("Max retries exceeded for transaction conflicts".to_string()))
+}
+
+async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool, ProcessingError> {
     let mut txn = graph.start_txn().await?;
 
     let deposits_bolt: Vec<BoltType> = block_data
