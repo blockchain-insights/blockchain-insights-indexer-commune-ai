@@ -496,7 +496,6 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
     let lock_query = "
         UNWIND $block_numbers as block_num
         MERGE (b:Block {height: block_num})
-        WITH b LOCK
         RETURN count(b) as locked_blocks
     ";
 
