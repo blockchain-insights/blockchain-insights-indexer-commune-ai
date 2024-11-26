@@ -939,6 +939,7 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         ";
 
     let data_query = neo4rs::Query::new(query.to_string())
+        .param("blocks", BoltType::List(BoltList::from(blocks_bolt.clone())))
         .param("deposits", BoltType::List(BoltList::from(deposits_bolt)))
         .param("withdrawals", BoltType::List(BoltList::from(withdrawals_bolt)))
         .param("transfers", BoltType::List(BoltList::from(transfers_bolt)))
