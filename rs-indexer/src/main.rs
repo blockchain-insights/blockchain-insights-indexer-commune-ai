@@ -480,7 +480,7 @@ async fn fetch_blocks_data(start_block: i64, end_block: i64) -> Result<BlockData
 }
 
 
-async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool, ProcessingError> {
+async fn store_block_data(graph: &Graph, block_data: &BlockData, state: &mut ProcessingState) -> Result<bool, ProcessingError> {
     let max_retries = 3;
     let mut retry_count = 0;
     
@@ -1131,7 +1131,8 @@ async fn main() -> Result<()> {
                     }
                 }
                 AsyncTask::StoreData(data) => {
-                    match timeout(Duration::from_secs(30), store_block_data(&graph_clone, &data)).await {
+                    let mut state = ProcessingState::default();
+                    match timeout(Duration::from_secs(30), store_block_data(&graph_clone, &data, &mut state)).await {
                         Ok(result) => {
                             match result {
                                 Ok(success) => result_tx.send(AsyncResult::DataStored(success)).await.unwrap(),
