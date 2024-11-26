@@ -12,6 +12,9 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, span, warn, Level};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static LAST_QUERY_TIME: AtomicU64 = AtomicU64::new(0);
 
 async fn initialize_indices(graph: &Graph, db_type: &str) -> Result<(), ProcessingError> {
     match db_type {
@@ -363,6 +366,18 @@ enum ProcessingError {
 }
 
 async fn fetch_blocks_data(start_block: i64, end_block: i64) -> Result<BlockData, ProcessingError> {
+    // Add rate limiting
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    
+    let last = LAST_QUERY_TIME.load(Ordering::Relaxed);
+    if now - last < 1000 { // Ensure at least 1 second between queries
+        tokio::time::sleep(Duration::from_millis(1000 - (now - last))).await;
+    }
+    LAST_QUERY_TIME.store(now, Ordering::Relaxed);
+
     let subql_url = std::env::var("SUBQL_URL").expect("SUBQL_URL must be set");
     let client = reqwest::Client::new();
     let query = r#"
@@ -466,6 +481,34 @@ async fn fetch_blocks_data(start_block: i64, end_block: i64) -> Result<BlockData
 
 
 async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool, ProcessingError> {
+    let max_retries = 3;
+    let mut retry_count = 0;
+    
+    loop {
+        match try_store_block_data(graph, block_data).await {
+            Ok(success) => return Ok(success),
+            Err(e) => {
+                if retry_count >= max_retries {
+                    return Err(e);
+                }
+                
+                if let ProcessingError::Neo4jError(neo4j_error) = &e {
+                    if neo4j_error.to_string().contains("Cannot resolve conflicting transactions") {
+                        retry_count += 1;
+                        let delay = 2u64.pow(retry_count);
+                        info!("Transaction conflict detected, retry {}/{} after {}s delay", 
+                            retry_count, max_retries, delay);
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                        continue;
+                    }
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
+async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool, ProcessingError> {
     // Collect all block numbers that need processing
     let mut block_numbers: Vec<i64> = Vec::new();
     block_numbers.extend(block_data.deposits.nodes.iter().map(|d| d.blockNumber));
@@ -1028,7 +1071,7 @@ async fn main() -> Result<()> {
         while let Some(task) = task_rx.recv().await {
             match task {
                 AsyncTask::FetchData(start_block, end_block) => {
-                    match timeout(Duration::from_secs(5), fetch_blocks_data(start_block, end_block)).await {
+                    match timeout(Duration::from_secs(30), fetch_blocks_data(start_block, end_block)).await {
                         Ok(result) => {
                             match result {
                                 Ok(data) => result_tx.send(AsyncResult::DataFetched(data)).await.unwrap(),
@@ -1041,7 +1084,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 AsyncTask::StoreData(data) => {
-                    match timeout(Duration::from_secs(5), store_block_data(&graph_clone, &data)).await {
+                    match timeout(Duration::from_secs(30), store_block_data(&graph_clone, &data)).await {
                         Ok(result) => {
                             match result {
                                 Ok(success) => result_tx.send(AsyncResult::DataStored(success)).await.unwrap(),
@@ -1087,6 +1130,13 @@ async fn main() -> Result<()> {
                         if success {
                             info!("Data stored successfully for blocks: {} to {}",
                               state.last_processed_block, state.current_batch_end);
+                            
+                            // Gradually increase batch size on successful operations
+                            if !state.polling_mode && state.retry_count == 0 {
+                                state.batch_size = std::cmp::min(32, state.batch_size + 1);
+                                info!("Increasing batch size to {} after successful operation", state.batch_size);
+                            }
+                            
                             state.state = State::Idle;
                             state.last_processed_block = state.current_batch_end + 1;
                             state.retry_count = 0;
@@ -1198,9 +1248,15 @@ async fn main() -> Result<()> {
                 if state.retry_count > 3 {
                     warn!("Max retries reached for batch starting at block: {}, moving to next batch",
                       state.last_processed_block);
+                    
+                    // Reduce batch size before moving to next batch
+                    if state.batch_size > 1 {
+                        state.batch_size = std::cmp::max(1, state.batch_size / 2);
+                        info!("Reducing batch size to {} after repeated failures", state.batch_size);
+                    }
+                    
                     state.state = State::Idle;
                     state.retry_count = 0;
-
                     state.last_processed_block = state.current_batch_end + 1;
                     state.current_batch_end = 0;  // Will be set in start_sys
 
