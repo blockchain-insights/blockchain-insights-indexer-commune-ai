@@ -5,13 +5,44 @@ services:
       - "7474:7474"
       - "7687:7687"
     environment:
-      - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
+      - NEO4J_AUTH=${GRAPH_DB_USER}/${GRAPH_DB_PASSWORD}
     volumes:
       - comai_funds_flow_db:/data
       - comai_funds_flow_logs:/logs
+  memgraph:
+    image: memgraph/memgraph-mage:1.18-memgraph-2.18
+    ports:
+      - "7687:7687"
+      - "7444:7444"
+    environment:
+      - MEMGRAPH_USER=${GRAPH_DB_USER}
+      - MEMGRAPH_PASSWORD=${GRAPH_DB_PASSWORD}
+    command: [ "--storage-parallel-schema-recovery=true", "--storage-recovery-thread-count=60", "--storage-gc-cycle-sec=300", "--log-level=TRACE", "--also-log-to-stderr", "--storage-snapshot-on-exit=false", "--storage-snapshot-interval-sec=14400", "--storage-snapshot-retention-count=2", "--storage-wal-enabled=true", "--isolation-level=READ_COMMITTED", "--replication-restore-state-on-startup=true", "--query-execution-timeout-sec=0" ]
+    volumes:
+      - comai_memgraph_data:/var/lib/memgraph
+      - comai_memgraph_log:/var/log/memgraph
+      - comai_memgraph_etc:/etc/memgraph
+    restart: unless-stopped
+  memgraph-lab:
+    image: memgraph/lab:latest
+    container_name: memgraph-lab
+    ports:
+      - "3001:3001"
+    depends_on:
+      - memgraph
+    environment:
+      - QUICK_CONNECT_MG_HOST=memgraph
+      - QUICK_CONNECT_MG_PORT=7687
+      - PORT=3001
 
 volumes:
   comai_funds_flow_db:
     name: comai_funds_flow_db
   comai_funds_flow_logs:
     name: comai_funds_flow_logs
+  comai_memgraph_data:
+    name: comai_memgraph_data
+  comai_memgraph_log:
+    name: comai_memgraph_log
+  comai_memgraph_etc:
+    name: comai_memgraph_etc
