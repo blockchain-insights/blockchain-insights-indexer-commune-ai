@@ -466,52 +466,50 @@ async fn fetch_blocks_data(start_block: i64, end_block: i64) -> Result<BlockData
 
 
 async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool, ProcessingError> {
-    let max_retries = 3;
-    let mut retry_count = 0;
+    // Collect all block numbers that need processing
+    let mut block_numbers: Vec<i64> = Vec::new();
+    block_numbers.extend(block_data.deposits.nodes.iter().map(|d| d.blockNumber));
+    block_numbers.extend(block_data.withdrawals.nodes.iter().map(|w| w.blockNumber));
+    block_numbers.extend(block_data.transfers.nodes.iter().map(|t| t.blockNumber));
+    block_numbers.extend(block_data.stakeAddeds.nodes.iter().map(|s| s.blockNumber));
+    block_numbers.extend(block_data.stakeRemoveds.nodes.iter().map(|s| s.blockNumber));
+    block_numbers.extend(block_data.balanceSets.nodes.iter().map(|b| b.blockNumber));
     
-    while retry_count < max_retries {
-        match try_store_block_data(graph, block_data).await {
-            Ok(success) => return Ok(success),
-            Err(e) => {
-                if let ProcessingError::Neo4jError(ref neo_err) = e {
-                    if neo_err.to_string().contains("Cannot resolve conflicting transactions") {
-                        retry_count += 1;
-                        if retry_count < max_retries {
-                            info!("Transaction conflict detected, retrying ({}/{})", retry_count, max_retries);
-                            tokio::time::sleep(Duration::from_millis(100 * retry_count as u64)).await;
-                            continue;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
-    }
-    
-    Err(ProcessingError::ProcessError("Max retries exceeded for transaction conflicts".to_string()))
-}
+    // Sort and deduplicate block numbers
+    block_numbers.sort();
+    block_numbers.dedup();
 
-async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool, ProcessingError> {
-    // Check if there's any data to process
-    let total_operations = block_data.deposits.nodes.len() +
-        block_data.withdrawals.nodes.len() +
-        block_data.transfers.nodes.len() +
-        block_data.stakeAddeds.nodes.len() +
-        block_data.stakeRemoveds.nodes.len() +
-        block_data.balanceSets.nodes.len();
-
-    if total_operations == 0 {
+    if block_numbers.is_empty() {
         info!("No operations to process in this batch, skipping transaction");
         return Ok(true);
     }
 
-    info!("Starting transaction for blocks {} to {} with {} total operations", 
-        block_data.deposits.nodes.first().map(|d| d.blockNumber).unwrap_or(0),
-        block_data.deposits.nodes.last().map(|d| d.blockNumber).unwrap_or(0),
-        total_operations
+    info!("Starting transaction for blocks {} to {} with {} blocks to process", 
+        block_numbers.first().unwrap_or(&0),
+        block_numbers.last().unwrap_or(&0),
+        block_numbers.len()
     );
-    
+
+    // Start transaction and acquire locks on blocks in order
     let mut txn = graph.start_txn().await?;
+    
+    let lock_query = "
+        UNWIND $block_numbers as block_num
+        MERGE (b:Block {height: block_num})
+        WITH b LOCK
+        RETURN count(b) as locked_blocks
+    ";
+
+    let lock_params = neo4rs::Query::new(lock_query.to_string())
+        .param("block_numbers", BoltType::List(BoltList::from(
+            block_numbers.iter()
+                .map(|&n| BoltType::Integer(n.into()))
+                .collect::<Vec<_>>()
+        )));
+
+    txn.run(lock_params).await?;
+    
+    info!("Acquired locks on {} blocks", block_numbers.len());
 
     let deposits_bolt: Vec<BoltType> = block_data
         .deposits
