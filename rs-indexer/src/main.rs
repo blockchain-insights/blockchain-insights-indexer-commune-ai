@@ -22,51 +22,50 @@ async fn initialize_indices(graph: &Graph, db_type: &str) -> Result<(), Processi
 }
 
 async fn initialize_memgraph_indices(graph: &Graph) -> Result<(), ProcessingError> {
-    let check_indices = "SHOW INDEX INFO;";
-    let mut result = graph.execute(check_indices.into()).await?;
-    let mut existing_indices = Vec::new();
-
-    while let Some(row) = result.next().await? {
-        if let Ok(label) = row.get::<String>("label") {
-            if let Ok(property) = row.get::<String>("property") {
-                existing_indices.push((label, property));
-            }
-        }
-    }
-
-    let required_indices = vec![
+    let indices = vec![
         ("Address", "address"),
         ("Transaction", "id"),
-        ("Cache", "field"),
+        ("Transaction", "block_height"),
+        ("Transaction", "type"),
+        ("Transaction", "timestamp"),
     ];
 
-    for (label, property) in required_indices {
-        let index_exists = existing_indices.iter().any(|(l, p)|
-            l == label && p == property
+    for (label, property) in indices {
+        let query = format!(
+            "CREATE INDEX ON :{}({});",
+            label, property
         );
-
-        if !index_exists {
-            let query = format!(
-                "CREATE INDEX ON :{} ({})",
-                label, property
-            );
-            match graph.run(query.as_str().into()).await {
-                Ok(_) => info!("Created index on {}.{}", label, property),
-                Err(e) => {
-                    error!("Failed to create index on {}.{}: {:?}", label, property, e);
-                    return Err(ProcessingError::Neo4jError(e));
-                }
+        match graph.run(query.as_str().into()).await {
+            Ok(_) => info!("Created index on {}.{}", label, property),
+            Err(e) => {
+                error!("Failed to create index on {}.{}: {:?}", label, property, e);
+                return Err(ProcessingError::Neo4jError(e));
             }
-        } else {
-            info!("Index on {}.{} already exists", label, property);
         }
     }
 
-    info!("Memgraph indices verification completed");
+    // Add uniqueness constraints
+    let constraints = vec![
+        "CREATE CONSTRAINT ON (a:Address) ASSERT a.address IS UNIQUE;",
+        "CREATE CONSTRAINT ON (t:Transaction) ASSERT t.id IS UNIQUE;"
+    ];
+
+    for constraint in constraints {
+        match graph.run(constraint.into()).await {
+            Ok(_) => info!("Created constraint: {}", constraint),
+            Err(e) => {
+                error!("Failed to create constraint: {:?}", e);
+                return Err(ProcessingError::Neo4jError(e));
+            }
+        }
+    }
+
+    info!("Memgraph indices and constraints verification completed");
     Ok(())
 }
 
 async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> {
+    // First check/create constraint on Address.address
     let check_constraint = "
         SHOW CONSTRAINTS
         YIELD name, labelsOrTypes, properties
@@ -78,7 +77,6 @@ async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> 
     let constraint_exists = result.next().await?.is_some();
 
     if !constraint_exists {
-        // Create constraint only if it doesn't exist
         let constraint_query = "CREATE CONSTRAINT address_unique IF NOT EXISTS FOR (a:Address) REQUIRE a.address IS UNIQUE;";
         match graph.run(constraint_query.into()).await {
             Ok(_) => info!("Created unique constraint on Address.address"),
@@ -87,15 +85,20 @@ async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> 
                 return Err(ProcessingError::Neo4jError(e));
             }
         }
-    } else {
-        info!("Address unique constraint already exists");
     }
 
-    let check_indices = "
-        SHOW INDEXES
-        YIELD name, labelsOrTypes, properties
-    ";
+    // Add transaction node uniqueness constraint
+    let tx_constraint_query = "CREATE CONSTRAINT transaction_id_unique IF NOT EXISTS FOR (t:Transaction) REQUIRE t.id IS UNIQUE;";
+    match graph.run(tx_constraint_query.into()).await {
+        Ok(_) => info!("Created unique constraint on Transaction.id"),
+        Err(e) => {
+            error!("Failed to create Transaction constraint: {:?}", e);
+            return Err(ProcessingError::Neo4jError(e));
+        }
+    }
 
+    // Check and create required indices
+    let check_indices = "SHOW INDEXES YIELD name, labelsOrTypes, properties";
     let mut indices_result = graph.execute(check_indices.into()).await?;
     let mut existing_indices = Vec::new();
 
@@ -106,16 +109,15 @@ async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> 
     }
 
     let required_indices = vec![
-        ("Transaction", "id"),
+        ("Transaction", "block_height"),
+        ("Transaction", "type"),
+        ("Transaction", "timestamp"),
+        ("Block", "height"),
         ("Cache", "field"),
     ];
 
     for (label, property) in required_indices {
-        let index_exists = existing_indices.iter().any(|(l, p)|
-            l.contains(label) && p.contains(property)
-        );
-
-        if !index_exists {
+        if !existing_indices.iter().any(|(l, p)| l.contains(label) && p.contains(property)) {
             let query = format!(
                 "CREATE INDEX IF NOT EXISTS FOR (n:{}) ON (n.{})",
                 label, property
@@ -127,8 +129,6 @@ async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> 
                     return Err(ProcessingError::Neo4jError(e));
                 }
             }
-        } else {
-            info!("Index on {}.{} already exists", label, property);
         }
     }
 
@@ -689,86 +689,146 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         .collect();
 
     let query = "
-    // First create all addresses including system in a single operation
-    MERGE (system:Address {address: 'system'})
-    WITH system
-    UNWIND $deposits + $withdrawals + $transfers + $stake_addeds + $stake_removeds + $balance_sets AS tx
-    WITH system, tx, 
-         CASE 
-           WHEN tx.toId IS NOT NULL THEN tx.toId 
-           WHEN tx.fromId IS NOT NULL THEN tx.fromId
-           WHEN tx.whoId IS NOT NULL THEN tx.whoId
-         END AS addr
-    WHERE addr IS NOT NULL
-    MERGE (a:Address {address: addr})
-    
-    // Process all transactions in a single pass
-    WITH system, collect(DISTINCT tx) as all_txs
-    UNWIND all_txs as tx
-    WITH system, tx,
-         CASE tx
-           WHEN tx IN $deposits THEN 'deposit'
-           WHEN tx IN $withdrawals THEN 'withdrawal'
-           WHEN tx IN $transfers THEN 'transfer'
-           WHEN tx IN $stake_addeds THEN 'stake_added'
-           WHEN tx IN $stake_removeds THEN 'stake_removed'
-           WHEN tx IN $balance_sets THEN 'balance_set'
-         END as tx_type,
-         CASE
-           WHEN tx IN $deposits THEN tx.toId
-           WHEN tx IN $withdrawals THEN tx.fromId
-           WHEN tx IN $transfers THEN tx.fromId
-           WHEN tx IN $stake_addeds THEN tx.fromId
-           WHEN tx IN $stake_removeds THEN tx.fromId
-           WHEN tx IN $balance_sets THEN tx.whoId
-         END as from_addr,
-         CASE
-           WHEN tx IN $deposits THEN null
-           WHEN tx IN $withdrawals THEN null
-           WHEN tx IN $transfers THEN tx.toId
-           WHEN tx IN $stake_addeds THEN tx.toId
-           WHEN tx IN $stake_removeds THEN tx.toId
-           WHEN tx IN $balance_sets THEN null
-         END as to_addr
-    
-    WITH system, tx, tx_type, from_addr, to_addr,
-         CASE
-           WHEN tx_type IN ['deposit', 'balance_set'] THEN [system, null]
-           WHEN tx_type = 'withdrawal' THEN [null, system]
-           ELSE [null, null]
-         END as system_endpoints
-    
-    MATCH (start:Address {address: COALESCE(system_endpoints[0], from_addr)})
-    MATCH (end:Address {address: COALESCE(system_endpoints[1], COALESCE(to_addr, from_addr))})
-    
-    MERGE (start)-[tr:TRANSACTION {id: tx.id}]->(end)
-    ON CREATE SET 
-        tr.type = tx_type,
-        tr.amount = toFloat(tx.amount),
-        tr.block_height = tx.blockNumber,
-        tr.timestamp = datetime(tx.date + 'Z')
-    ON MATCH SET 
-        tr.amount = toFloat(tx.amount),
-        tr.block_height = tx.blockNumber,
-        tr.timestamp = datetime(tx.date + 'Z')
-    
-    RETURN count(*) AS txs_operations
-";
+        // First create system address
+        MERGE (system:Address {address: 'system'})
 
-    let blocks_query = "\
-// Create or update blocks
-    UNWIND $blocks AS block
-        MERGE (b:Block {height: block.height})
-        SET b.deposit_count = block.deposit_count,
-            b.withdrawal_count = block.withdrawal_count,
-            b.transfer_count = block.transfer_count,
-            b.stake_added_count = block.stake_added_count,
-            b.stake_removed_count = block.stake_removed_count,
-            b.balance_set_count = block.balance_set_count,
-            b.total_txs = block.total_txs
+        // Create all addresses first (separate step)
+        WITH system
+        UNWIND $deposits + $withdrawals + $transfers + $stake_addeds + $stake_removeds + $balance_sets AS tx
+        WITH DISTINCT system,
+            CASE
+                WHEN tx.toId IS NOT NULL THEN tx.toId
+                WHEN tx.fromId IS NOT NULL THEN tx.fromId
+                WHEN tx.whoId IS NOT NULL THEN tx.whoId
+            END AS addr
+        WHERE addr IS NOT NULL AND addr <> 'system'
+        MERGE (a:Address {address: addr})
 
-    RETURN count(*) AS blk_operations
-    ";
+        // Process deposits one by one
+        WITH system
+        UNWIND $deposits as deposit
+            MATCH (to:Address {address: deposit.toId})
+            CREATE (txNode:Transaction {
+                id: deposit.id,
+                type: 'deposit',
+                amount: toFloat(deposit.amount),
+                block_height: deposit.blockNumber,
+                timestamp: datetime(deposit.date + 'Z')
+            })
+            CREATE (system)-[:DEPOSITS_FROM]->(txNode)
+            CREATE (txNode)-[:DEPOSIT_TO]->(to)
+            CREATE (system)-[:DEPOSIT {
+                id: deposit.id,
+                amount: toFloat(deposit.amount),
+                block_height: deposit.blockNumber,
+                timestamp: datetime(deposit.date + 'Z')
+            }]->(to)
+
+        // Process transfers one by one
+        WITH system
+        UNWIND $transfers as transfer
+            MATCH (from:Address {address: transfer.fromId})
+            MATCH (to:Address {address: transfer.toId})
+            CREATE (txNode:Transaction {
+                id: transfer.id,
+                type: 'transfer',
+                amount: toFloat(transfer.amount),
+                block_height: transfer.blockNumber,
+                timestamp: datetime(transfer.date + 'Z')
+            })
+            CREATE (from)-[:TRANSFERS_FROM]->(txNode)
+            CREATE (txNode)-[:TRANSFER_TO]->(to)
+            CREATE (from)-[:TRANSFER {
+                id: transfer.id,
+                amount: toFloat(transfer.amount),
+                block_height: transfer.blockNumber,
+                timestamp: datetime(transfer.date + 'Z')
+            }]->(to)
+
+        // Process withdrawals one by one
+        WITH system
+        UNWIND $withdrawals as withdrawal
+            MATCH (from:Address {address: withdrawal.fromId})
+            CREATE (txNode:Transaction {
+                id: withdrawal.id,
+                type: 'withdrawal',
+                amount: toFloat(withdrawal.amount),
+                block_height: withdrawal.blockNumber,
+                timestamp: datetime(withdrawal.date + 'Z')
+            })
+            CREATE (from)-[:WITHDRAWS_FROM]->(txNode)
+            CREATE (txNode)-[:WITHDRAWS_TO]->(system)
+            CREATE (from)-[:WITHDRAWAL {
+                id: withdrawal.id,
+                amount: toFloat(withdrawal.amount),
+                block_height: withdrawal.blockNumber,
+                timestamp: datetime(withdrawal.date + 'Z')
+            }]->(system)
+
+        // Process stake additions one by one
+        WITH system
+        UNWIND $stake_addeds as stake
+            MATCH (from:Address {address: stake.fromId})
+            MATCH (to:Address {address: stake.toId})
+            CREATE (txNode:Transaction {
+                id: stake.id,
+                type: 'stake_added',
+                amount: toFloat(stake.amount),
+                block_height: stake.blockNumber,
+                timestamp: datetime(stake.date + 'Z')
+            })
+            CREATE (from)-[:STAKES_FROM]->(txNode)
+            CREATE (txNode)-[:STAKES_TO]->(to)
+            CREATE (from)-[:STAKE_ADDED {
+                id: stake.id,
+                amount: toFloat(stake.amount),
+                block_height: stake.blockNumber,
+                timestamp: datetime(stake.date + 'Z')
+            }]->(to)
+
+        // Process stake removals one by one
+        WITH system
+        UNWIND $stake_removeds as unstake
+            MATCH (from:Address {address: unstake.fromId})
+            MATCH (to:Address {address: unstake.toId})
+            CREATE (txNode:Transaction {
+                id: unstake.id,
+                type: 'stake_removed',
+                amount: toFloat(unstake.amount),
+                block_height: unstake.blockNumber,
+                timestamp: datetime(unstake.date + 'Z')
+            })
+            CREATE (from)-[:UNSTAKES_FROM]->(txNode)
+            CREATE (txNode)-[:UNSTAKES_TO]->(to)
+            CREATE (from)-[:STAKE_REMOVED {
+                id: unstake.id,
+                amount: toFloat(unstake.amount),
+                block_height: unstake.blockNumber,
+                timestamp: datetime(unstake.date + 'Z')
+            }]->(to)
+
+        // Process balance sets one by one
+        WITH system
+        UNWIND $balance_sets as balance
+            MATCH (addr:Address {address: balance.whoId})
+            CREATE (txNode:Transaction {
+                id: balance.id,
+                type: 'balance_set',
+                amount: toFloat(balance.amount),
+                block_height: balance.blockNumber,
+                timestamp: datetime(balance.date + 'Z')
+            })
+            CREATE (system)-[:BALANCE_SET_FROM]->(txNode)
+            CREATE (txNode)-[:BALANCE_SET_TO]->(addr)
+            CREATE (system)-[:BALANCE_SET {
+                id: balance.id,
+                amount: toFloat(balance.amount),
+                block_height: balance.blockNumber,
+                timestamp: datetime(balance.date + 'Z')
+            }]->(addr)
+
+        RETURN count(*) AS operations
+        ";
 
     let data_query = neo4rs::Query::new(query.to_string())
         .param("deposits", BoltType::List(BoltList::from(deposits_bolt)))
@@ -779,6 +839,44 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         .param("balance_sets", BoltType::List(BoltList::from(balance_sets_bolt)));
 
     txn.run(data_query).await?;
+
+    let blocks_query = "
+        // Create or update blocks and link to transactions
+        UNWIND $blocks AS block
+            MERGE (b:Block {height: block.height})
+            SET b.deposit_count = block.deposit_count,
+                b.withdrawal_count = block.withdrawal_count,
+                b.transfer_count = block.transfer_count,
+                b.stake_added_count = block.stake_added_count,
+                b.stake_removed_count = block.stake_removed_count,
+                b.balance_set_count = block.balance_set_count,
+                b.total_txs = block.total_txs
+
+            WITH b
+
+            // Find all transactions for this block without pattern in WHERE clause
+            MATCH (t:Transaction)
+            WHERE t.block_height = b.height
+            MERGE (b)-[:CONTAINS]->(t)
+
+            // Chain linking using explicit height comparisons
+            WITH b
+            OPTIONAL MATCH (next:Block)
+            WHERE next.height = b.height + 1
+            WITH b, next
+            OPTIONAL MATCH (prev:Block)
+            WHERE prev.height = b.height - 1
+            WITH b, next, prev
+
+            FOREACH(_ IN CASE WHEN next IS NOT NULL THEN [1] ELSE [] END |
+                MERGE (b)-[:NEXT]->(next)
+            )
+            FOREACH(_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
+                MERGE (prev)-[:NEXT]->(b)
+            )
+
+        RETURN count(*) AS blk_operations
+        ";
 
     let blocks_query = neo4rs::Query::new(blocks_query.parse().unwrap())
         .param("blocks", BoltType::List(BoltList::from(blocks_bolt)));
