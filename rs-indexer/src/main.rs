@@ -495,9 +495,11 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
                 if let ProcessingError::Neo4jError(neo4j_error) = &e {
                     if neo4j_error.to_string().contains("Cannot resolve conflicting transactions") {
                         retry_count += 1;
-                        let delay = 2u64.pow(retry_count);
-                        info!("Transaction conflict detected, retry {}/{} after {}s delay", 
-                            retry_count, max_retries, delay);
+                        // Reduce batch size more aggressively on conflicts
+                        state.batch_size = std::cmp::max(1, state.batch_size / 2);
+                        let delay = 2u64.pow(retry_count + 1); // More aggressive backoff
+                        info!("Transaction conflict detected, retry {}/{} after {}s delay. Reduced batch size to {}", 
+                            retry_count, max_retries, delay, state.batch_size);
                         tokio::time::sleep(Duration::from_secs(delay)).await;
                         continue;
                     }
@@ -538,7 +540,18 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
     
     let lock_query = "
         UNWIND $block_numbers as block_num
+        WITH block_num ORDER BY block_num  // Ensure consistent ordering
         MERGE (b:Block {height: block_num})
+        WITH b
+        OPTIONAL MATCH (prev:Block {height: b.height - 1})
+        OPTIONAL MATCH (next:Block {height: b.height + 1})
+        WITH b, prev, next
+        FOREACH(x IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (prev)-[:NEXT]->(b)
+        )
+        FOREACH(x IN CASE WHEN next IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (b)-[:NEXT]->(next)
+        )
         RETURN count(b) as locked_blocks
     ";
 
@@ -551,7 +564,39 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
 
     txn.run(lock_params).await?;
     
-    info!("Acquired locks on {} blocks", block_numbers.len());
+    // Collect and lock all addresses involved in the transaction
+    let mut addresses: Vec<String> = Vec::new();
+    addresses.extend(block_data.deposits.nodes.iter().map(|d| d.toId.clone()));
+    addresses.extend(block_data.withdrawals.nodes.iter().map(|w| w.fromId.clone()));
+    addresses.extend(block_data.transfers.nodes.iter().map(|t| t.fromId.clone()));
+    addresses.extend(block_data.transfers.nodes.iter().map(|t| t.toId.clone()));
+    addresses.extend(block_data.stakeAddeds.nodes.iter().map(|s| s.fromId.clone()));
+    addresses.extend(block_data.stakeAddeds.nodes.iter().map(|s| s.toId.clone()));
+    addresses.extend(block_data.stakeRemoveds.nodes.iter().map(|s| s.fromId.clone()));
+    addresses.extend(block_data.stakeRemoveds.nodes.iter().map(|s| s.toId.clone()));
+    addresses.extend(block_data.balanceSets.nodes.iter().map(|b| b.whoId.clone()));
+    addresses.push("system".to_string());
+    addresses.sort();
+    addresses.dedup();
+
+    let address_lock_query = "
+        WITH $addresses as addrs
+        UNWIND addrs as addr
+        WITH DISTINCT addr ORDER BY addr
+        MERGE (a:Address {address: addr})
+        RETURN count(a) as locked_addresses
+    ";
+
+    let address_params = neo4rs::Query::new(address_lock_query.to_string())
+        .param("addresses", BoltType::List(BoltList::from(
+            addresses.iter()
+                .map(|addr| BoltType::String(addr.clone().into()))
+                .collect::<Vec<_>>()
+        )));
+
+    txn.run(address_params).await?;
+    
+    info!("Acquired locks on {} blocks and {} addresses", block_numbers.len(), addresses.len());
 
     let deposits_bolt: Vec<BoltType> = block_data
         .deposits
@@ -735,12 +780,13 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         .collect();
 
     let query = "
-        // First create system address
-        MERGE (system:Address {address: 'system'})
+        // Start with system address (already locked)
+        MATCH (system:Address {address: 'system'})
 
-        // Create all addresses first (separate step)
+        // Process all operations in strict block order
         WITH system
-        UNWIND $deposits + $withdrawals + $transfers + $stake_addeds + $stake_removeds + $balance_sets AS tx
+        UNWIND $blocks as block
+        WITH system, block.height as block_height
         WITH DISTINCT system,
             CASE
                 WHEN tx.toId IS NOT NULL THEN tx.toId
@@ -946,12 +992,13 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
     if max_block > 0 {
         let cache_query = "
             MERGE (n:Cache {field: 'max_block_height'})
-            WITH n, n.value as current_value, $new_value as new_value
+            WITH n
             SET n.value = CASE
-                WHEN current_value IS NULL OR new_value > current_value
-                THEN new_value
-                ELSE current_value
+                WHEN n.value IS NULL OR $new_value > n.value
+                THEN $new_value
+                ELSE n.value
             END
+            RETURN n.value as updated_value
         ";
 
         let cache_update = neo4rs::Query::new(cache_query.to_string())
