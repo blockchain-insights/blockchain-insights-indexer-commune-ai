@@ -717,27 +717,31 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
                 txNode.amount = toFloat(deposit.amount),
                 txNode.block_height = deposit.blockNumber,
                 txNode.timestamp = datetime(deposit.date + 'Z')
-            MERGE (system)-[:DEPOSITS_FROM {
+            MERGE (system)-[r1:DEPOSITS_FROM {
                 tx_id: deposit.id,
                 from_id: system.address,
                 to_id: txNode.id,
                 block_height: deposit.blockNumber
             }]->(txNode)
-            MERGE (txNode)-[:DEPOSIT_TO {
+            MERGE (txNode)-[r2:DEPOSIT_TO {
                 tx_id: deposit.id,
                 from_id: txNode.id,
                 to_id: to.address,
                 block_height: deposit.blockNumber
             }]->(to)
-            MERGE (system)-[:DEPOSIT {
+            MERGE (system)-[r3:DEPOSIT {
                 tx_id: deposit.id,
                 from_id: system.address,
                 to_id: to.address,
                 block_height: deposit.blockNumber
             }]->(to)
             ON CREATE SET 
-                _.amount = toFloat(deposit.amount),
-                _.timestamp = datetime(deposit.date + 'Z')
+                r1.amount = toFloat(deposit.amount),
+                r1.timestamp = datetime(deposit.date + 'Z'),
+                r2.amount = toFloat(deposit.amount),
+                r2.timestamp = datetime(deposit.date + 'Z'),
+                r3.amount = toFloat(deposit.amount),
+                r3.timestamp = datetime(deposit.date + 'Z')
 
         // Process transfers one by one
         WITH system
@@ -884,10 +888,10 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
             WITH b, next, prev
 
             FOREACH(x IN CASE WHEN next IS NOT NULL THEN [1] ELSE [] END |
-                MERGE (b)-[r:NEXT]->(next)
+                MERGE (b)-[:NEXT]->(next)
             )
             FOREACH(x IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
-                MERGE (prev)-[r:NEXT]->(b)
+                MERGE (prev)-[:NEXT]->(b)
             )
 
         RETURN count(*) AS blk_operations
