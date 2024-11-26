@@ -783,16 +783,49 @@ async fn try_store_block_data(graph: &Graph, block_data: &BlockData) -> Result<b
         // Start with system address (already locked)
         MATCH (system:Address {address: 'system'})
 
-        // Process all operations in strict block order
+        // Create all addresses first
         WITH system
-        UNWIND $blocks as block
-        WITH system, block.height as block_height
-        WITH DISTINCT system,
-            CASE
-                WHEN tx.toId IS NOT NULL THEN tx.toId
-                WHEN tx.fromId IS NOT NULL THEN tx.fromId
-                WHEN tx.whoId IS NOT NULL THEN tx.whoId
-            END AS addr
+        UNWIND $deposits as deposit
+        WITH DISTINCT system, deposit.toId as addr
+        WHERE addr IS NOT NULL AND addr <> 'system'
+        MERGE (a:Address {address: addr})
+
+        WITH system
+        UNWIND $withdrawals as withdrawal
+        WITH DISTINCT system, withdrawal.fromId as addr
+        WHERE addr IS NOT NULL AND addr <> 'system'
+        MERGE (a:Address {address: addr})
+
+        WITH system
+        UNWIND $transfers as transfer
+        WITH DISTINCT system, transfer.fromId as fromAddr, transfer.toId as toAddr
+        WHERE fromAddr IS NOT NULL AND fromAddr <> 'system'
+        MERGE (a1:Address {address: fromAddr})
+        WITH system, toAddr
+        WHERE toAddr IS NOT NULL AND toAddr <> 'system'
+        MERGE (a2:Address {address: toAddr})
+
+        WITH system
+        UNWIND $stake_addeds as stake
+        WITH DISTINCT system, stake.fromId as fromAddr, stake.toId as toAddr
+        WHERE fromAddr IS NOT NULL AND fromAddr <> 'system'
+        MERGE (a1:Address {address: fromAddr})
+        WITH system, toAddr
+        WHERE toAddr IS NOT NULL AND toAddr <> 'system'
+        MERGE (a2:Address {address: toAddr})
+
+        WITH system
+        UNWIND $stake_removeds as unstake
+        WITH DISTINCT system, unstake.fromId as fromAddr, unstake.toId as toAddr
+        WHERE fromAddr IS NOT NULL AND fromAddr <> 'system'
+        MERGE (a1:Address {address: fromAddr})
+        WITH system, toAddr
+        WHERE toAddr IS NOT NULL AND toAddr <> 'system'
+        MERGE (a2:Address {address: toAddr})
+
+        WITH system
+        UNWIND $balance_sets as balance
+        WITH DISTINCT system, balance.whoId as addr
         WHERE addr IS NOT NULL AND addr <> 'system'
         MERGE (a:Address {address: addr})
 
