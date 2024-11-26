@@ -46,8 +46,7 @@ async fn initialize_memgraph_indices(graph: &Graph) -> Result<(), ProcessingErro
 
     // Add uniqueness constraints
     let constraints = vec![
-        "CREATE CONSTRAINT ON (a:Address) ASSERT a.address IS UNIQUE;",
-        "CREATE CONSTRAINT ON (t:Transaction) ASSERT t.id IS UNIQUE;"
+        "CREATE CONSTRAINT ON (a:Address) ASSERT a.address IS UNIQUE;"
     ];
 
     for constraint in constraints {
@@ -87,15 +86,6 @@ async fn initialize_neo4j_indices(graph: &Graph) -> Result<(), ProcessingError> 
         }
     }
 
-    // Add transaction node uniqueness constraint
-    let tx_constraint_query = "CREATE CONSTRAINT transaction_id_unique IF NOT EXISTS FOR (t:Transaction) REQUIRE t.id IS UNIQUE;";
-    match graph.run(tx_constraint_query.into()).await {
-        Ok(_) => info!("Created unique constraint on Transaction.id"),
-        Err(e) => {
-            error!("Failed to create Transaction constraint: {:?}", e);
-            return Err(ProcessingError::Neo4jError(e));
-        }
-    }
 
     // Check and create required indices
     let check_indices = "SHOW INDEXES YIELD name, labelsOrTypes, properties";
