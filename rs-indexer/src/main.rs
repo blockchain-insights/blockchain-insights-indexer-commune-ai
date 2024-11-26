@@ -452,8 +452,24 @@ async fn fetch_blocks_data(start_block: i64, end_block: i64) -> Result<BlockData
         .await
         .map_err(|e| ProcessingError::FetchError(e.to_string()))?;
 
-   let block_data: BlockData = serde_json::from_value(response["data"].clone())
-        .map_err(|e| ProcessingError::ProcessError(e.to_string()))?;
+    // Initialize empty BlockData structure
+    let empty_block_data = BlockData {
+        deposits: Nodes { nodes: vec![] },
+        withdrawals: Nodes { nodes: vec![] },
+        transfers: Nodes { nodes: vec![] },
+        stakeAddeds: Nodes { nodes: vec![] },
+        stakeRemoveds: Nodes { nodes: vec![] },
+        balanceSets: Nodes { nodes: vec![] },
+    };
+
+    // Try to parse the response, fall back to empty data if parsing fails
+    let block_data = match serde_json::from_value::<BlockData>(response["data"].clone()) {
+        Ok(data) => data,
+        Err(e) => {
+            warn!("Failed to parse block data: {}. Using empty block data.", e);
+            empty_block_data
+        }
+    };
 
     Ok(block_data)
 }
