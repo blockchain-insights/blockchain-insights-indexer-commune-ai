@@ -711,21 +711,33 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
         WITH system
         UNWIND $deposits as deposit
             MATCH (to:Address {address: deposit.toId})
-            CREATE (txNode:Transaction {
-                id: deposit.id,
-                type: 'deposit',
-                amount: toFloat(deposit.amount),
-                block_height: deposit.blockNumber,
-                timestamp: datetime(deposit.date + 'Z')
-            })
-            CREATE (system)-[:DEPOSITS_FROM]->(txNode)
-            CREATE (txNode)-[:DEPOSIT_TO]->(to)
-            CREATE (system)-[:DEPOSIT {
-                id: deposit.id,
-                amount: toFloat(deposit.amount),
-                block_height: deposit.blockNumber,
-                timestamp: datetime(deposit.date + 'Z')
+            MERGE (txNode:Transaction {id: deposit.id})
+            ON CREATE SET 
+                txNode.type = 'deposit',
+                txNode.amount = toFloat(deposit.amount),
+                txNode.block_height = deposit.blockNumber,
+                txNode.timestamp = datetime(deposit.date + 'Z')
+            MERGE (system)-[:DEPOSITS_FROM {
+                tx_id: deposit.id,
+                from_id: system.address,
+                to_id: txNode.id,
+                block_height: deposit.blockNumber
+            }]->(txNode)
+            MERGE (txNode)-[:DEPOSIT_TO {
+                tx_id: deposit.id,
+                from_id: txNode.id,
+                to_id: to.address,
+                block_height: deposit.blockNumber
             }]->(to)
+            MERGE (system)-[:DEPOSIT {
+                tx_id: deposit.id,
+                from_id: system.address,
+                to_id: to.address,
+                block_height: deposit.blockNumber
+            }]->(to)
+            ON CREATE SET 
+                _.amount = toFloat(deposit.amount),
+                _.timestamp = datetime(deposit.date + 'Z')
 
         // Process transfers one by one
         WITH system
