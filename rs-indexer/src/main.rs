@@ -883,11 +883,11 @@ async fn store_block_data(graph: &Graph, block_data: &BlockData) -> Result<bool,
             WHERE prev.height = b.height - 1
             WITH b, next, prev
 
-            FOREACH(_ IN CASE WHEN next IS NOT NULL THEN [1] ELSE [] END |
-                MERGE (b)-[:NEXT]->(next)
+            FOREACH(x IN CASE WHEN next IS NOT NULL THEN [1] ELSE [] END |
+                MERGE (b)-[r:NEXT]->(next)
             )
-            FOREACH(_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
-                MERGE (prev)-[:NEXT]->(b)
+            FOREACH(x IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
+                MERGE (prev)-[r:NEXT]->(b)
             )
 
         RETURN count(*) AS blk_operations
